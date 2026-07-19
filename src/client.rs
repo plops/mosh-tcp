@@ -43,6 +43,8 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> any
     let predictor_input = Arc::clone(&predictor);
 
     std::thread::spawn(move || {
+        let mut filter = ResponseFilter::new();
+
         while running_clone.load(Ordering::Relaxed) {
             if event::poll(std::time::Duration::from_millis(20)).unwrap_or(false) {
                 match event::read() {
@@ -54,12 +56,18 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> any
                             break;
                         }
 
-                        let data = key_event_to_bytes(key_event);
-                        if !data.is_empty() {
-                            if let Ok(mut pred) = predictor_input.lock() {
-                                let _ = pred.handle_keystroke(&data);
+                        let raw_data = key_event_to_bytes(key_event);
+                        if !raw_data.is_empty() {
+                            let text = String::from_utf8_lossy(&raw_data);
+                            let clean_text = filter.filter(&text);
+                            let data = clean_text.into_bytes();
+
+                            if !data.is_empty() {
+                                if let Ok(mut pred) = predictor_input.lock() {
+                                    let _ = pred.handle_keystroke(&data);
+                                }
+                                let _ = input_tx.blocking_send(Packet::ClientInput { data });
                             }
-                            let _ = input_tx.blocking_send(Packet::ClientInput { data });
                         }
                     }
                     Ok(Event::Resize(cols, rows)) => {
@@ -114,6 +122,55 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> any
     running.store(false, Ordering::Relaxed);
     send_handle.abort();
     Ok(())
+}
+
+struct ResponseFilter {
+    buffer: String,
+}
+
+impl ResponseFilter {
+    fn new() -> Self {
+        Self { buffer: String::new() }
+    }
+
+    fn filter(&mut self, text: &str) -> String {
+        self.buffer.push_str(text);
+
+        let mut clean = String::new();
+        let mut idx = 0;
+        let bytes = self.buffer.as_bytes();
+
+        while idx < bytes.len() {
+            let slice = &self.buffer[idx..];
+
+            // Filter OSC 10 / OSC 11 response patterns: "]10;rgb:..." or "]11;rgb:..."
+            if slice.starts_with("]10;rgb:") || slice.starts_with("]11;rgb:") {
+                if let Some(end) = slice.find(|c| c == '\\' || c == '\x1b' || c == '\r' || c == '\n') {
+                    idx += end + 1;
+                    continue;
+                } else {
+                    break;
+                }
+            }
+
+            // Filter DA response patterns: "0;...c"
+            if slice.starts_with("0;") {
+                if let Some(c_pos) = slice.find('c') {
+                    let sub = &slice[..=c_pos];
+                    if sub.chars().all(|ch| ch.is_ascii_digit() || ch == ';' || ch == 'c') {
+                        idx += c_pos + 1;
+                        continue;
+                    }
+                }
+            }
+
+            clean.push(bytes[idx] as char);
+            idx += 1;
+        }
+
+        self.buffer = self.buffer[idx..].to_string();
+        clean
+    }
 }
 
 fn key_event_to_bytes(key: event::KeyEvent) -> Vec<u8> {
