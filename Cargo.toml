@@ -1,0 +1,34 @@
+[package]
+name = "mosh-tcp"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "mosh_tcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mosh-tcp"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "io-util", "sync"] }
+portable-pty = "0.9"
+crossterm = "0.29"
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+flate2 = "1.1"
+bytes = "1.12"
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+anyhow = "1.0"
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["process"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
