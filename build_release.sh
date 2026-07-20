@@ -10,7 +10,13 @@ if command -v upx >/dev/null 2>&1; then
     echo "=== Compressing binary with UPX (LZMA) ==="
     upx --best --lzma "$BINARY"
 else
-    echo "Notice: 'upx' is not installed. Install upx to compress the binary down to ~300 kB."
+    echo "Notice: 'upx' is not installed."
+    echo "To compress the binary down to ~300 kB, install UPX using your package manager:"
+    echo "  - Debian / Ubuntu / Termux: sudo apt install upx"
+    echo "  - Arch Linux:               sudo pacman -S upx"
+    echo "  - Fedora / RHEL:            sudo dnf install upx"
+    echo "  - macOS (Homebrew):         brew install upx"
+    echo "  - Alpine Linux:             sudo apk add upx"
 fi
 
 echo ""
