@@ -76,14 +76,26 @@ jobs:
           echo "Created archive: $tar_name"
           ls -lh "$tar_name"
 
+      - name: Extract Tag Release Body
+        shell: bash
+        run: |
+          echo "Extracting release notes from tag annotation..."
+          git tag -l --format='%(contents)' "${{ github.ref_name }}" > release_body.md
+          if [ ! -s release_body.md ]; then
+            git log -1 --format='%s%n%n%b' > release_body.md
+          fi
+          echo "=== RELEASE BODY TO BE PUBLISHED ON GITHUB WEBSITE ==="
+          cat release_body.md
+          echo "======================================================"
+
       - name: Upload assets to release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
           tag_name: ${{ github.ref_name }}
+          body_path: release_body.md
           files: |
             mosh-tcp-linux-amd64.tar.gz
-          generate_release_notes: true
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
