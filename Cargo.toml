@@ -22,6 +22,7 @@ bytes = "1.12"
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 anyhow = "1.0"
+vt100 = "0.15.2"
 
 [dev-dependencies]
 tokio = { version = "1.53", features = ["process"] }

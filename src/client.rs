@@ -29,14 +29,17 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> any
     let framed = Framed::new(socket, PacketCodec::new());
     let (mut writer, mut reader) = framed.split();
 
+    let predictor = Arc::new(Mutex::new(LocalPredictor::new(enable_predictive)));
+
     if let Ok((cols, rows)) = size() {
+        if let Ok(mut pred) = predictor.lock() {
+            pred.set_size(rows, cols);
+        }
         let _ = writer.send(Packet::ClientResize { rows, cols }).await;
     }
 
     let running = Arc::new(AtomicBool::new(true));
     let (input_tx, mut input_rx) = mpsc::channel::<Packet>(100);
-
-    let predictor = Arc::new(Mutex::new(LocalPredictor::new(enable_predictive)));
 
     // Task 1: Stdin & Terminal Event loop
     let running_clone = Arc::clone(&running);
@@ -69,6 +72,9 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> any
                         }
                     }
                     Ok(Event::Resize(cols, rows)) => {
+                        if let Ok(mut pred) = predictor_input.lock() {
+                            pred.set_size(rows, cols);
+                        }
                         let _ = input_tx.blocking_send(Packet::ClientResize { rows, cols });
                     }
                     _ => {}
