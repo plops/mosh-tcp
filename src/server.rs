@@ -103,11 +103,8 @@ async fn handle_client(
                 Ok(0) => break,
                 Ok(n) => {
                     telemetry_pty.pty_bytes_in.fetch_add(n as u64, Ordering::Relaxed);
-                    let cleaned = strip_terminal_queries(&buf[..n]);
-                    if !cleaned.is_empty() {
-                        if let Ok(mut guard) = pty_buffer_clone.lock() {
-                            guard.extend_from_slice(&cleaned);
-                        }
+                    if let Ok(mut guard) = pty_buffer_clone.lock() {
+                        guard.extend_from_slice(&buf[..n]);
                     }
                 }
                 Err(_) => break,
@@ -195,23 +192,46 @@ async fn handle_client(
                     if guard.is_empty() {
                         None
                     } else {
-                        if guard.len() > MAX_PTY_BUFFER_CAP {
-                            let overflow = guard.len() - RETAIN_RECENT_BYTES;
-                            telemetry_send.bytes_dropped.fetch_add(overflow as u64, Ordering::Relaxed);
-                            telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
-                            *guard = guard[overflow..].to_vec();
-                        }
+                        // 1. First apply stateful query stripping
+                        let (cleaned, remaining) = strip_terminal_queries_stateful(&guard);
+                        *guard = remaining;
 
-                        let available = guard.len();
-                        let chunk_size = (tokens as usize).min(available);
-
-                        if chunk_size > 0 {
-                            let chunk = guard[..chunk_size].to_vec();
-                            *guard = guard[chunk_size..].to_vec();
-                            Some(chunk)
-                        } else {
-                            telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
+                        if cleaned.is_empty() {
                             None
+                        } else {
+                            let mut active_buffer = cleaned;
+
+                            // 2. Truncate safely if overloaded
+                            if active_buffer.len() > MAX_PTY_BUFFER_CAP {
+                                let split_point = find_safe_split_point(&active_buffer, active_buffer.len() - RETAIN_RECENT_BYTES);
+                                if split_point > 0 {
+                                    let overflow = split_point;
+                                    telemetry_send.bytes_dropped.fetch_add(overflow as u64, Ordering::Relaxed);
+                                    telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
+                                    active_buffer = active_buffer[overflow..].to_vec();
+                                }
+                            }
+
+                            // 3. Determine how much we can send under the token bucket
+                            let available = active_buffer.len();
+                            let split_point = find_safe_split_point(&active_buffer, tokens as usize);
+
+                            if split_point > 0 {
+                                let chunk = active_buffer[..split_point].to_vec();
+                                if split_point < available {
+                                    let rest = &active_buffer[split_point..];
+                                    let mut new_guard = rest.to_vec();
+                                    new_guard.extend_from_slice(&guard);
+                                    *guard = new_guard;
+                                }
+                                Some(chunk)
+                            } else {
+                                let mut new_guard = active_buffer;
+                                new_guard.extend_from_slice(&guard);
+                                *guard = new_guard;
+                                telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
+                                None
+                            }
                         }
                     }
                 } else {
@@ -286,7 +306,70 @@ async fn handle_client(
     Ok(())
 }
 
-fn strip_terminal_queries(data: &[u8]) -> Vec<u8> {
+fn find_safe_split_point(buf: &[u8], target: usize) -> usize {
+    if target >= buf.len() {
+        return buf.len();
+    }
+    if target == 0 {
+        return 0;
+    }
+
+    let mut safe_points = Vec::new();
+    safe_points.push(0);
+
+    let mut i = 0;
+    while i < buf.len() {
+        if buf[i] == 0x1b {
+            i += 1;
+            if i < buf.len() {
+                if buf[i] == b'[' {
+                    i += 1;
+                    while i < buf.len() {
+                        let b = buf[i];
+                        i += 1;
+                        if (0x40..=0x7E).contains(&b) {
+                            break;
+                        }
+                    }
+                } else if buf[i] == b']' {
+                    i += 1;
+                    while i < buf.len() {
+                        if buf[i] == 0x07 {
+                            i += 1;
+                            break;
+                        } else if buf[i] == 0x1b && i + 1 < buf.len() && buf[i + 1] == b'\\' {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            safe_points.push(i);
+        } else {
+            let b = buf[i];
+            if b < 0x80 || b >= 0xC0 {
+                safe_points.push(i);
+            }
+            i += 1;
+        }
+    }
+    safe_points.push(buf.len());
+
+    let mut best = 0;
+    for &pt in &safe_points {
+        if pt <= target {
+            best = pt;
+        } else {
+            break;
+        }
+    }
+    best
+}
+
+fn strip_terminal_queries_stateful(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let mut result = Vec::with_capacity(data.len());
     let mut i = 0;
     while i < data.len() {
@@ -308,24 +391,42 @@ fn strip_terminal_queries(data: &[u8]) -> Vec<u8> {
             if found_st {
                 i = j;
                 continue;
+            } else {
+                return (result, data[i..].to_vec());
             }
         }
 
-        if i + 3 <= data.len() && &data[i..i + 3] == b"\x1b[c" {
-            i += 3;
-            continue;
-        }
-        if i + 4 <= data.len() && (&data[i..i + 4] == b"\x1b[0c" || &data[i..i + 4] == b"\x1b[>c" || &data[i..i + 4] == b"\x1b[>q") {
-            i += 4;
-            continue;
-        }
-        if i + 5 <= data.len() && &data[i..i + 5] == b"\x1b[>0c" {
-            i += 5;
-            continue;
+        if data[i] == 0x1b {
+            if i + 1 == data.len() {
+                return (result, data[i..].to_vec());
+            }
+            let next = data[i + 1];
+            if next == b'[' {
+                let mut j = i + 2;
+                let mut found_end = false;
+                while j < data.len() {
+                    let b = data[j];
+                    if (0x40..=0x7E).contains(&b) {
+                        found_end = true;
+                        j += 1;
+                        break;
+                    }
+                    j += 1;
+                }
+                if found_end {
+                    let sub = &data[i..j];
+                    if sub == b"\x1b[c" || sub == b"\x1b[0c" || sub == b"\x1b[>c" || sub == b"\x1b[>0c" || sub == b"\x1b[>q" {
+                        i = j;
+                        continue;
+                    }
+                } else {
+                    return (result, data[i..].to_vec());
+                }
+            }
         }
 
         result.push(data[i]);
         i += 1;
     }
-    result
+    (result, Vec::new())
 }
