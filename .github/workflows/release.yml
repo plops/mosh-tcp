@@ -72,13 +72,17 @@ jobs:
           tar_name="mosh-tcp-linux-amd64.tar.gz"
           tar czf "$tar_name" -C staging .
           rm -rf staging
+          echo "Created archive: $tar_name"
+          ls -la "$tar_name"
 
       - name: Upload assets to release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
+          tag_name: ${{ github.ref_name }}
           files: |
-            mosh-tcp-*.tar.gz
+            mosh-tcp-linux-amd64.tar.gz
           generate_release_notes: true
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
