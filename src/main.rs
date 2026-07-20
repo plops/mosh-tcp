@@ -14,6 +14,8 @@ async fn main() -> anyhow::Result<()> {
         "server" => {
             let mut bind: SocketAddr = "0.0.0.0:4000".parse().unwrap();
             let mut fps = 50u64;
+            let mut max_kbps = 6u64;
+            let mut stats = false;
             let mut shell = None;
 
             let mut i = 2;
@@ -31,6 +33,15 @@ async fn main() -> anyhow::Result<()> {
                             i += 1;
                         }
                     }
+                    "--max-kbps" => {
+                        if i + 1 < args.len() {
+                            max_kbps = args[i + 1].parse()?;
+                            i += 1;
+                        }
+                    }
+                    "--stats" => {
+                        stats = true;
+                    }
                     "--shell" => {
                         if i + 1 < args.len() {
                             shell = Some(args[i + 1].clone());
@@ -41,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 i += 1;
             }
-            server::run_server(bind, fps, shell).await?;
+            server::run_server(bind, fps, max_kbps, stats, shell).await?;
         }
         "client" => {
             let mut connect: SocketAddr = "127.0.0.1:4000".parse().unwrap();
@@ -74,6 +85,6 @@ async fn main() -> anyhow::Result<()> {
 fn print_usage() {
     println!("mosh-tcp - A high-latency resilient, frame-rate limited terminal tool\n");
     println!("Usage:");
-    println!("  mosh-tcp server [--bind <ADDR:PORT>] [--fps <FPS>] [--shell <PATH>]");
+    println!("  mosh-tcp server [--bind <ADDR:PORT>] [--fps <FPS>] [--max-kbps <KB/S>] [--stats] [--shell <PATH>]");
     println!("  mosh-tcp client [--connect <ADDR:PORT>] [--predict]");
 }
