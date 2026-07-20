@@ -99,6 +99,7 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> any
                     Some(Ok(Packet::ServerFrame { data, compressed, .. })) => {
                         if let Ok(raw) = Packet::decompress_data(&data, compressed) {
                             if let Ok(mut pred) = predictor_recv.lock() {
+                                pred.inspect_server_frame(&raw, &mut stdout);
                                 let _ = pred.clear_predictions(&mut stdout);
                             }
                             let _ = stdout.write_all(&raw);
