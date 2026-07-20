@@ -15,6 +15,7 @@ else
     echo "  - Debian / Ubuntu / Termux: sudo apt install upx"
     echo "  - Arch Linux:               sudo pacman -S upx"
     echo "  - Fedora / RHEL:            sudo dnf install upx"
+    echo "  - Gentoo Linux:             sudo emerge -av upx-bin"
     echo "  - macOS (Homebrew):         brew install upx"
     echo "  - Alpine Linux:             sudo apk add upx"
 fi
