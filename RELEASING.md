@@ -6,7 +6,7 @@ This document describes the automated release workflow for `mosh-tcp`.
 
 ## 1. Overview & Architecture
 
-`mosh-tcp` uses GitHub Actions (`.github/workflows/release.yml`) to automatically build Linux release binaries and publish release assets whenever a git tag matching `v*` (e.g. `v0.2.0`) is pushed to GitHub.
+`mosh-tcp` uses GitHub Actions (`.github/workflows/release.yml`) to automatically build Linux release binaries and publish release assets whenever a git tag matching `v*` (e.g. `v0.2.0`) is pushed to GitHub or triggered manually via `workflow_dispatch`.
 
 ### Release Artifacts Published
 Each GitHub Release contains:
@@ -62,12 +62,24 @@ To ensure the GitHub Release webpage contains a full collation of all changes:
    - Full collated list of conventional commits (`feat: ...`, `fix: ...`, `docs: ...`, `ci: ...`).
 
 3. **GitHub Release Page Generation**:
-   When the tag is pushed to GitHub, `.github/workflows/release.yml` triggers `softprops/action-gh-release@v2` with `generate_release_notes: true`.
+   When the tag is pushed to GitHub (or manually triggered via `workflow_dispatch`), `.github/workflows/release.yml` triggers `softprops/action-gh-release@v2` with:
+   - `tag_name: ${{ github.ref_name }}`
+   - `generate_release_notes: true`
+   - `fail_on_unmatched_files: true`
    GitHub parses the tag message, pull requests, and commit logs to build a clean, formatted changelog directly on the release webpage next to the downloadable `mosh-tcp-linux-amd64.tar.gz` asset.
 
 ---
 
-## 4. Manual Step Summary (For Reference)
+## 4. Troubleshooting Empty Release Uploads
+
+If "Upload assets to release" was empty in previous runs:
+- Ensure the trigger condition evaluates to true (`if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'`).
+- Ensure `tag_name` is explicitly passed (`tag_name: ${{ github.ref_name }}`).
+- Ensure `fail_on_unmatched_files: true` is set so the workflow fails explicitly if `mosh-tcp-linux-amd64.tar.gz` is not generated.
+
+---
+
+## 5. Manual Step Summary (For Reference)
 
 If running commands manually without `./scripts/release.sh`:
 
