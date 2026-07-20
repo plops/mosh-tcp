@@ -29,6 +29,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install UPX
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y upx
+
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
@@ -55,12 +60,13 @@ jobs:
             exit 1
           fi
 
-          # Copy documentation if present
+          # Compress binary with UPX for maximum size reduction
+          echo "Compressing mosh-tcp binary with UPX..."
+          upx --best --lzma staging/mosh-tcp
+
+          # Copy README documentation if present (walkthrough.md excluded)
           if [ -f README.md ]; then
             cp README.md staging/
-          fi
-          if [ -f walkthrough.md ]; then
-            cp walkthrough.md staging/
           fi
 
           # Archive asset
@@ -68,7 +74,7 @@ jobs:
           tar czf "$tar_name" -C staging .
           rm -rf staging
           echo "Created archive: $tar_name"
-          ls -la "$tar_name"
+          ls -lh "$tar_name"
 
       - name: Upload assets to release
         uses: softprops/action-gh-release@v2

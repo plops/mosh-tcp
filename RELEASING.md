@@ -13,7 +13,7 @@ Each GitHub Release contains:
 - `mosh-tcp-linux-amd64.tar.gz` — Tarball containing:
   - `mosh-tcp` — The release binary (`x86_64-unknown-linux-gnu`)
   - `README.md` — Project documentation
-  - `walkthrough.md` — Architecture walkthrough & VT100/mouse engine documentation
+  - Binary compressed using **UPX** (`--best --lzma`) and compiled with max size reduction (`opt-level = "z"`, `lto`, `panic = "abort"`, `strip`)
 - **Automated Collated Release Notes** — Published directly on the GitHub Release webpage.
 
 ---
