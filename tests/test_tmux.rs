@@ -1,0 +1,56 @@
+use mosh_tcp::protocol::{Packet, PacketCodec};
+use futures::sink::SinkExt;
+use futures::stream::StreamExt;
+use std::net::SocketAddr;
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::net::TcpStream;
+use tokio::process::Command;
+use tokio::time::sleep;
+use tokio_util::codec::Framed;
+
+#[tokio::test]
+async fn test_tmux_session() -> anyhow::Result<()> {
+    let bind_addr: SocketAddr = "127.0.0.1:4098".parse()?;
+
+    // 1. Start mosh-tcp server on port 4098
+    let mut server_proc = Command::new("./target/debug/mosh-tcp")
+        .args(&["server", "--bind", "127.0.0.1:4098", "--fps", "50"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    sleep(Duration::from_millis(500)).await;
+
+    // 2. Connect client
+    let socket = TcpStream::connect(bind_addr).await?;
+    let framed = Framed::new(socket, PacketCodec::new());
+    let (mut writer, mut reader) = framed.split();
+
+    writer.send(Packet::ClientResize { rows: 24, cols: 80 }).await?;
+
+    // Send export TERM=xterm-256color and tmux
+    println!(">>> Sending 'export TERM=xterm-256color; tmux' command to mosh-tcp PTY...");
+    writer.send(Packet::ClientInput { data: b"export TERM=xterm-256color\ntmux\n".to_vec() }).await?;
+
+    let mut all_output = Vec::new();
+
+    // Read frames for 3 seconds
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(3000);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(Packet::ServerFrame { data, compressed, .. }))) =
+            tokio::time::timeout(Duration::from_millis(100), reader.next()).await
+        {
+            let raw = Packet::decompress_data(&data, compressed)?;
+            all_output.extend_from_slice(&raw);
+        }
+    }
+
+    let output_str = String::from_utf8_lossy(&all_output);
+    println!("=== TMUX OUTPUT RECEIVED FROM SERVER ===");
+    println!("{:?}", output_str);
+    println!("========================================");
+
+    let _ = server_proc.kill().await;
+    Ok(())
+}

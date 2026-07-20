@@ -45,25 +45,27 @@ async fn handle_client(socket: TcpStream, frame_ms: u64, shell_cmd: Option<Strin
 
     let mut cmd = CommandBuilder::new(&shell);
     cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
     let mut _child = pair.slave.spawn_command(cmd)?;
 
     let mut pty_reader = pair.master.try_clone_reader()?;
     let pty_writer = Arc::new(Mutex::new(pair.master.take_writer()?));
     let master_pair = Arc::new(Mutex::new(pair.master));
 
-    // Shared buffer for accumulating PTY output between 20ms frames
     let pty_buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
     let pty_buffer_clone = Arc::clone(&pty_buffer);
 
-    // Dedicated OS thread to read PTY stdout into buffer without blocking Tokio runtime
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
             match pty_reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if let Ok(mut guard) = pty_buffer_clone.lock() {
-                        guard.extend_from_slice(&buf[..n]);
+                    let cleaned = strip_terminal_queries(&buf[..n]);
+                    if !cleaned.is_empty() {
+                        if let Ok(mut guard) = pty_buffer_clone.lock() {
+                            guard.extend_from_slice(&cleaned);
+                        }
                     }
                 }
                 Err(_) => break,
@@ -78,7 +80,6 @@ async fn handle_client(socket: TcpStream, frame_ms: u64, shell_cmd: Option<Strin
     let mut frame_timer = interval(Duration::from_millis(frame_ms));
     let mut seq: u64 = 0;
 
-    // Task 1: Frame accumulator & sender task (runs every frame_ms, e.g. 20ms)
     let send_task = tokio::spawn(async move {
         loop {
             frame_timer.tick().await;
@@ -112,7 +113,6 @@ async fn handle_client(socket: TcpStream, frame_ms: u64, shell_cmd: Option<Strin
         }
     });
 
-    // Task 2: Receive inputs / resize requests from client
     let master_resize = Arc::clone(&master_pair);
     let pty_writer_input = Arc::clone(&pty_writer);
 
@@ -135,7 +135,6 @@ async fn handle_client(socket: TcpStream, frame_ms: u64, shell_cmd: Option<Strin
                 }
             }
             Ok(Packet::Ping { timestamp }) => {
-                // Ignore or handle ping if needed
                 let _ = timestamp;
             }
             Ok(_) => {}
@@ -148,4 +147,50 @@ async fn handle_client(socket: TcpStream, frame_ms: u64, shell_cmd: Option<Strin
 
     send_task.abort();
     Ok(())
+}
+
+fn strip_terminal_queries(data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        // Strip OSC 10/11 queries: \x1b]10;?\x1b\ or \x1b]10;?\x07 or \x1b]11;?\x1b\ or \x1b]11;?\x07
+        if i + 5 <= data.len() && (&data[i..i + 5] == b"\x1b]10;" || &data[i..i + 5] == b"\x1b]11;") {
+            let mut j = i + 5;
+            let mut found_st = false;
+            while j < data.len() {
+                if data[j] == 0x07 {
+                    j += 1;
+                    found_st = true;
+                    break;
+                } else if data[j] == 0x1b && j + 1 < data.len() && data[j + 1] == b'\\' {
+                    j += 2;
+                    found_st = true;
+                    break;
+                }
+                j += 1;
+            }
+            if found_st {
+                i = j;
+                continue;
+            }
+        }
+
+        // Strip DA / DA2 / XTVERSION queries: \x1b[c, \x1b[0c, \x1b[>c, \x1b[>0c, \x1b[>q
+        if i + 3 <= data.len() && &data[i..i + 3] == b"\x1b[c" {
+            i += 3;
+            continue;
+        }
+        if i + 4 <= data.len() && (&data[i..i + 4] == b"\x1b[0c" || &data[i..i + 4] == b"\x1b[>c" || &data[i..i + 4] == b"\x1b[>q") {
+            i += 4;
+            continue;
+        }
+        if i + 5 <= data.len() && &data[i..i + 5] == b"\x1b[>0c" {
+            i += 5;
+            continue;
+        }
+
+        result.push(data[i]);
+        i += 1;
+    }
+    result
 }
