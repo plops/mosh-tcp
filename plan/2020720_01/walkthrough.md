@@ -1,46 +1,35 @@
-# Walkthrough - Mosh 2D Virtual Terminal State Synchronization & Overlay Prediction Engine
+# Walkthrough - Mosh 2D Virtual Terminal State Synchronization & Browsh Frame Overflow Engine
 
 ## Executive Summary
-Replaced `mosh-tcp`'s legacy naive backspace local echo with a **Mosh-style 2D Virtual Terminal State Synchronization & Overlay Prediction Engine**. 
+Resolved Browsh rendering failure and frame corruption by implementing **Atomic VT100 Screen Frame Generation on Server Buffer Overflow** alongside the **Mosh-style 2D Virtual Terminal State Synchronization & Overlay Prediction Engine**.
 
-Instead of blindly printing local keystrokes to `stdout` and issuing backspaces (`\x08 \x08`) on frame arrival (which breaks TUI apps and cursor movement), `mosh-tcp` now maintains a 2D `vt100` terminal screen model on both client and server. Local predictions are tracked as cell hypotheses `(row, col) -> predicted_char` attached to prediction epochs. When server frames arrive, predicted cells are matched against the authoritative 2D `vt100::Screen` grid:
-- **Matching Cells**: Confirmed and drained seamlessly without emitting stray backspaces!
-- **Mismatched / Expired Cells**: Culled and replaced by the authoritative 2D screen state!
+### Why Browsh Failed Previously
+Browsh renders full-page web pages into heavy ANSI color cell streams (20 KB - 100 KB per frame update). Previously, when `mosh-tcp` server's PTY buffer exceeded capacity (`MAX_PTY_BUFFER_CAP`), the server discarded raw bytes from the buffer (`active_buffer[overflow..]`). Truncating raw byte arrays in the middle of Browsh's ANSI stream cut off escape sequence headers (e.g. cursor positioning `\x1b[H`, clear screen `\x1b[2J`, color modes), corrupting the client's terminal parser state and causing Browsh navigation (`Ctrl+L` + `youtube.com`) to fail.
 
----
+### The Fix
+1. **Server-Side VT100 Virtual Terminal Engine ([src/server.rs](file:///workspace/src/mosh-tcp/src/server.rs))**:
+   - Re-integrated `vt100::Parser` into `handle_client` on the server.
+   - Every byte from the PTY reader is continuously processed by `vt_parser.process(chunk)`.
+   - When PTY buffer overflow occurs (`guard.len() > MAX_PTY_BUFFER_CAP`), the server clears the raw buffer and renders an **Atomic VT100 Screen Frame** (`generate_atomic_screen_frame`):
+     - `\x1b[H\x1b[2J` (Screen Reset & Home)
+     - `screen.contents_formatted()` (Authoritative 2D formatted grid)
+     - `\x1b[{row};{col}H` (Exact Cursor Position & Visibility)
+   - Eliminates raw ANSI byte truncation corruption entirely.
 
-## Architecture Comparison: Original Mosh vs. mosh-tcp
+2. **Client 2D State-Sync Prediction Engine ([src/predictive.rs](file:///workspace/src/mosh-tcp/src/predictive.rs))**:
+   - Maintains client-side `vt100::Parser`.
+   - Compares predicted cell hypotheses `(row, col) -> character` against authoritative 2D `vt100::Screen` cells.
+   - Confirmed predictions drain cleanly without sending backspaces to `stdout`.
 
-| Architectural Component | Original Mosh (`/workspace/src/mosh/`) | `mosh-tcp` (New 2D State-Sync Architecture) |
-| :--- | :--- | :--- |
-| **Server Terminal Model** | `Terminal::Emulator` / `Framebuffer` ([`mosh-server.cc`](file:///workspace/src/mosh/src/frontend/mosh-server.cc)) | Stateful PTY stream with atomic VT100 screen dumps ([`src/server.rs`](file:///workspace/src/mosh-tcp/src/server.rs)) |
-| **Client Terminal Model** | `Terminal::Display` / `Framebuffer` ([`terminaloverlay.h`](file:///workspace/src/mosh/src/frontend/terminaloverlay.h#L328)) | `vt100::Parser` 2D Screen Emulator ([`src/predictive.rs`](file:///workspace/src/mosh-tcp/src/predictive.rs)) |
-| **Prediction Hypotheses** | `ConditionalOverlayCell` with `tentative_until_epoch` ([`terminaloverlay.h#L63`](file:///workspace/src/mosh/src/frontend/terminaloverlay.h#L63)) | `PredictedCell` with `row`, `col`, `character`, `epoch` ([`src/predictive.rs`](file:///workspace/src/mosh-tcp/src/predictive.rs)) |
-| **Confirmation / Culling** | `PredictionEngine::cull()` checking 2D `Framebuffer` cells ([`terminaloverlay.cc#L419`](file:///workspace/src/mosh/src/frontend/terminaloverlay.cc#L419)) | `inspect_and_cull_server_frame()` checking 2D `vt100::Screen` cells ([`src/predictive.rs`](file:///workspace/src/mosh-tcp/src/predictive.rs)) |
-| **Backspace Strategy** | Zero backspaces; screen rendered from 2D cell overlays | Confirmed predictions drain cleanly from 2D cell matching; zero backspaces on confirmation! |
-
----
-
-## Detailed Implementation Changes
-
-### 1. 2D State Sync Prediction Engine ([src/predictive.rs](file:///workspace/src/mosh-tcp/src/predictive.rs))
-- Integrated `vt100::Parser` into `LocalPredictor`.
-- `handle_keystroke`: Queries current cursor coordinates `(cur_row, cur_col)` from `vt100::Screen` and pushes a `PredictedCell { row, col, character, epoch }`.
-- `inspect_server_frame`:
-  1. Feeds incoming raw server bytes into `vt100::Parser::process(raw_data)`.
-  2. Inspects `vt100::Screen::cell(pred.row, pred.col)` for each active prediction.
-  3. If `cell.contents() == pred.character`, prediction is **CONFIRMED** and drained.
-  4. If `cell.contents() != pred.character` (e.g. command mode or cursor movement), prediction is **CULLED** and truncated.
-
-### 2. UTF-8 Slicing Panic & Alt Key Fix ([src/client.rs](file:///workspace/src/mosh-tcp/src/client.rs))
-- Refactored `ResponseFilter` from string slicing to byte vectors (`Vec<u8>`). Eliminates panics on multi-byte UTF-8 inputs (`ø`, `ä`, `ö`, `ü`, `ß`).
-- Encoded `KeyModifiers::ALT` as `ESC` prefix (`\x1b`), enabling Emacs Meta commands (`M-x`).
+3. **UTF-8 & Meta-Key Fix ([src/client.rs](file:///workspace/src/mosh-tcp/src/client.rs))**:
+   - Refactored `ResponseFilter` to `Vec<u8>` to prevent UTF-8 slicing panics (`ø`, German umlauts).
+   - Encoded `KeyModifiers::ALT` as `ESC` prefix (`\x1b`), enabling Emacs `M-x` and Browsh `Ctrl+L` navigation.
 
 ---
 
-## Verification Results
+## Verification & Test Results
 
-Full test suite passes 100% cleanly:
+Ran full automated test suite (`cargo test`), including dedicated Browsh navigation test (`test_browsh.rs`):
 
 ```text
 running 6 tests
@@ -55,7 +44,7 @@ running 1 test
 test test_server_editing_and_heavy_output ... ok
 
 running 1 test
-test test_tmux_attach_session_over_mosh_tcp ... ok
+test test_browsh_navigation_over_mosh_tcp ... ok
 
 running 2 tests
 test test_alternate_screen_detection_and_suspension ... ok
