@@ -50,6 +50,18 @@ pub async fn run_server(
     }
 }
 
+fn format_rate(bytes_per_sec: f64) -> String {
+    let kb_per_sec = bytes_per_sec / 1024.0;
+    if kb_per_sec < 0.1 {
+        format!("{:5.1} B/s ", bytes_per_sec)
+    } else if kb_per_sec < 1000.0 {
+        format!("{:5.1} KB/s", kb_per_sec)
+    } else {
+        let mb_per_sec = kb_per_sec / 1024.0;
+        format!("{:5.1} MB/s", mb_per_sec)
+    }
+}
+
 async fn handle_client(
     socket: TcpStream,
     frame_ms: u64,
@@ -125,21 +137,30 @@ async fn handle_client(
                 let skipped_frames = telemetry_stats.frames_skipped.load(Ordering::Relaxed);
                 let rtt = telemetry_stats.rtt_ms.load(Ordering::Relaxed);
 
-                let pty_rate_kb = (cur_pty_in.saturating_sub(last_pty_in)) as f64 / 1024.0;
-                let net_rate_kb = (cur_net_out.saturating_sub(last_net_out)) as f64 / 1024.0;
+                let delta_pty_in = cur_pty_in.saturating_sub(last_pty_in);
+                let delta_net_out = cur_net_out.saturating_sub(last_net_out);
 
                 last_pty_in = cur_pty_in;
                 last_net_out = cur_net_out;
 
-                let comp_ratio = if cur_pty_in > 0 {
-                    (1.0 - (cur_net_out as f64 / cur_pty_in as f64)) * 100.0
+                let pty_rate_str = format_rate(delta_pty_in as f64);
+                let net_rate_str = format_rate(delta_net_out as f64);
+
+                let inst_comp = if delta_pty_in > 0 {
+                    ((1.0 - (delta_net_out as f64 / delta_pty_in as f64)) * 100.0).clamp(0.0, 99.9)
+                } else {
+                    0.0
+                };
+
+                let total_comp = if cur_pty_in > 0 {
+                    ((1.0 - (cur_net_out as f64 / cur_pty_in as f64)) * 100.0).clamp(0.0, 99.9)
                 } else {
                     0.0
                 };
 
                 println!(
-                    "[mosh-tcp stats] PTY In: {:.2} KB/s | Net Out: {:.2} KB/s (Max: {} KB/s) | Comp: {:.1}% | Skipped: {:.1} KB | RTT: {} ms | Frames: {} sent / {} skipped",
-                    pty_rate_kb, net_rate_kb, max_kbps, comp_ratio, dropped as f64 / 1024.0, rtt, sent_frames, skipped_frames
+                    "[mosh-tcp stats] PTY In: {} | Net Out: {} (Max: {:5.1} KB/s) | Comp: {:4.1}% (cur) / {:4.1}% (tot) | Skipped: {:5.1} KB | RTT: {:3} ms | Frames: {:5} sent / {:5} skipped",
+                    pty_rate_str, net_rate_str, max_kbps as f64, inst_comp, total_comp, dropped as f64 / 1024.0, rtt, sent_frames, skipped_frames
                 );
             }
         }))
