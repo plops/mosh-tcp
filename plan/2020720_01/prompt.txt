@@ -1,0 +1,131 @@
+ich habe einen review von mosh-tcp gemacht denn
+ ich glaube, es funktioniert noch nicht so richtig gut, wenn ich zum Beispiel Browsh benutze oder in Emacs werden manchmal komische zeichen eingefuegt.
+
+ich bin mir nicht sicher ob der reviewer tatsaechlich weiss wie mosh intern funktioniert. daher habe ich dir den quellcode von mosh in /workspace/src/mosh abgelegt
+du kann weiterhin deepwiki mcp anfragen ueber mobile-shell/mosh stellen. erarbeite dir einen plan wie wir das rust programm mosh-tcp funktional und robust (und maintainable) umsetzen koennen
+
+
+Review:
+
+Das Problem, das du mit **Emacs** oder **Browsh** beobachtest, ist absolut logisch und liegt an der Art und Weise, wie `mosh-tcp` in seinem aktuellen Zustand das "Predictive Local Echo" (die lokale Vorhersage der Eingabe) implementiert.
+
+### Warum `mosh-tcp` aktuell bei TUI-Apps scheitert
+
+In der Datei `src/predictive.rs` von `mosh-tcp` passiert momentan Folgendes:
+1. Wenn du ein Zeichen tippst, wird es **blind an der aktuellen Cursor-Position** im Terminal ausgegeben (mit Unterstrich).
+2. Wenn die Server-Antwort (`ServerFrame`) eintrifft, versucht der Client die Vorhersage zu löschen, indem er stumpf Backspaces (`\x08 \x08`) sendet.
+
+**Das Problem:** Full-Screen TUI-Anwendungen (Terminal User Interfaces) wie Emacs, Vim, tmux oder Browsh funktionieren nicht wie eine einfache Shell. Sie bewegen den Cursor ständig wild über den Bildschirm (mittels ANSI-Escape-Sequenzen), zeichnen Statusleisten neu oder verwenden den *Alternate Screen Buffer*. 
+Wenn du in Emacs tippst, gibt `mosh-tcp` das Zeichen lokal aus, aber in der Zwischenzeit hat Emacs vielleicht den Cursor ganz woanders platziert. Die Backspaces (`\x08`), die das Zeichen später löschen sollen, zerstören dann das Layout der Anwendung komplett.
+
+---
+
+### Wie das originale `Mosh` die lokale Vorhersage (Predictive Echo) wirklich macht
+
+Das originale `mosh` (Mobile Shell) ist wesentlich komplexer und intelligenter. Es streamt *keine* rohen Bytes wie SSH oder `mosh-tcp`, sondern arbeitet komplett zustandsbasiert (**State Synchronization**).
+
+1. **Zwei Terminal-Emulatoren:** 
+   Mosh hat einen vollständigen Terminal-Emulator auf dem Server *und* einen auf dem Client. Der Server berechnet im Hintergrund ein 2D-Gitter (Screen-State) davon, wie das Terminal aktuell aussieht, und sendet nur die *Unterschiede (Diffs)* an den Client.
+2. **Hypothesen (Epochs):** 
+   Wenn du tippst, modifiziert das originale Mosh lokal sein *eigenes* virtuelles 2D-Gitter. Es markiert diese Vorhersagen als "Hypothese". Sobald der Server den echten Status schickt, vergleicht Mosh das echte 2D-Gitter mit seiner Hypothese. Stimmt sie überein, wird die Unterstreichung entfernt. Stimmt sie nicht, überschreibt der Server-State den lokalen Fehler nahtlos.
+3. **Intelligente Heuristik (Das Wichtigste!):**
+   Mosh erkennt, **wann es Vorhersagen komplett abschalten muss**. Es schaltet das "Predictive Echo" sofort ab, wenn:
+   * Eine Anwendung den Cursor manuell bewegt (z. B. Pfeiltasten in Vim/Emacs).
+   * Komplexe Escape-Sequenzen gesendet werden.
+   * Die Anwendung nicht exakt das Zeichen zurück-echot, das getippt wurde (ein Editor wie Emacs tut das oft nicht sofort).
+   * *Alternate Screen Buffer* aktiviert wird (ein sicheres Zeichen für Programme wie `less`, `vim`, `emacs`, `tmux`).
+
+---
+
+### Wie du `mosh-tcp` reparieren kannst (Quick Fix)
+
+Um das Konzept von Mosh in `mosh-tcp` vollständig nachzubauen, müsstest du die gesamte Architektur auf eine 2D-Grid-State-Sync-Engine umbauen. 
+
+Es gibt aber einen **sehr effektiven "Quick Fix"**, mit dem du zumindest das Problem mit Emacs, Vim und Browsh beheben kannst: **Erkenne den Alternate Screen Buffer und deaktiviere die Vorhersage dynamisch.**
+
+Full-Screen-Apps senden beim Start die ANSI-Sequenz `\x1b[?1049h` (Alternate Screen an) und beim Beenden `\x1b[?1049l` (Alternate Screen aus). Das können wir nutzen.
+
+#### 1. Anpassung in `src/predictive.rs`
+
+Füge einen Zustand hinzu, der festhält, ob wir in einer Full-Screen-App sind:
+
+```rust
+use std::io::{self, Write};
+use crossterm::style::{Attribute, SetAttribute};
+
+pub struct LocalPredictor {
+    enabled: bool,
+    active_predictions: usize,
+    pub suspend_predictions: bool, // NEU: Dynamisches Pausieren (z.B. für Emacs/Tmux)
+}
+
+impl LocalPredictor {
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            active_predictions: 0,
+            suspend_predictions: false, // NEU
+        }
+    }
+
+    pub fn handle_keystroke(&mut self, data: &[u8]) -> io::Result<()> {
+        // NEU: Wenn pausiert, mach gar nichts
+        if !self.enabled || self.suspend_predictions {
+            return Ok(());
+        }
+
+        // ... restlicher Code bleibt gleich ...
+```
+
+#### 2. Anpassung in `src/client.rs`
+
+Der Client muss den eingehenden Server-Traffic auf den Alternate-Screen-Buffer überprüfen und die Vorhersage entsprechend pausieren.
+
+Suche in der `run_client` Funktion den `Task 3: Network Receiver & Renderer` Teil und pass ihn an:
+
+```rust
+    // Task 3: Network Receiver & Renderer
+    let mut stdout = io::stdout();
+    let predictor_recv = Arc::clone(&predictor);
+
+    while running.load(Ordering::Relaxed) {
+        tokio::select! {
+            packet_opt = reader.next() => {
+                match packet_opt {
+                    Some(Ok(Packet::ServerFrame { data, compressed, .. })) => {
+                        if let Ok(raw) = Packet::decompress_data(&data, compressed) {
+                            
+                            // --- NEU: Heuristik für Full-Screen-Apps ---
+                            let text = String::from_utf8_lossy(&raw);
+                            let mut should_suspend = None;
+                            
+                            // Alternate Screen an (Start von Emacs, Vim, Tmux, Browsh)
+                            if text.contains("\x1b[?1049h") || text.contains("\x1b[?1047h") {
+                                should_suspend = Some(true);
+                            }
+                            // Alternate Screen aus (Beenden der App)
+                            else if text.contains("\x1b[?1049l") || text.contains("\x1b[?1047l") {
+                                should_suspend = Some(false);
+                            }
+
+                            if let Ok(mut pred) = predictor_recv.lock() {
+                                // Erst Vorhersagen sauber löschen
+                                let _ = pred.clear_predictions(&mut stdout);
+                                
+                                // Dann Status aktualisieren
+                                if let Some(suspend) = should_suspend {
+                                    pred.suspend_predictions = suspend;
+                                }
+                            }
+                            // ------------------------------------------
+
+                            let _ = stdout.write_all(&raw);
+                            let _ = stdout.flush();
+                        }
+                    }
+// ... Rest der Funktion
+```
+
+### Was dieser Fix bewirkt:
+Wenn du in der normalen Shell (Bash/Zsh) bist, funktioniert das Predictive Echo von `mosh-tcp` weiterhin, um hohe Latenzen zu verschleiern.
+Sobald du `emacs`, `vim`, `tmux` oder `browsh` startest, senden diese Apps die Sequenz `\x1b[?1049h`. Der Client erkennt das, löscht die letzten Vorhersagen und **deaktiviert die lokale Vorhersage komplett**. In Emacs hast du dann zwar die reale Netzwerklatenz, aber **keine kaputten Formatierungen oder falschen Zeichen** mehr. Wenn du Emacs beendest, wird die Vorhersage automatisch wieder eingeschaltet.
