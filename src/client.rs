@@ -198,7 +198,22 @@ fn key_event_to_bytes(key: event::KeyEvent) -> Vec<u8> {
         KeyCode::Left => vec![27, 91, 68],
         KeyCode::Home => vec![27, 91, 72],
         KeyCode::End => vec![27, 91, 70],
-        KeyCode::Delete => vec![27, 91, 51, 126],
+        KeyCode::PageUp => vec![27, 91, 53, 126],    // \x1b[5~
+        KeyCode::PageDown => vec![27, 91, 54, 126],  // \x1b[6~
+        KeyCode::Insert => vec![27, 91, 50, 126],    // \x1b[2~
+        KeyCode::Delete => vec![27, 91, 51, 126],    // \x1b[3~
+        KeyCode::F(1) => vec![27, 79, 80],
+        KeyCode::F(2) => vec![27, 79, 81],
+        KeyCode::F(3) => vec![27, 79, 82],
+        KeyCode::F(4) => vec![27, 79, 83],
+        KeyCode::F(5) => vec![27, 91, 49, 53, 126],
+        KeyCode::F(6) => vec![27, 91, 49, 55, 126],
+        KeyCode::F(7) => vec![27, 91, 49, 56, 126],
+        KeyCode::F(8) => vec![27, 91, 49, 57, 126],
+        KeyCode::F(9) => vec![27, 91, 50, 48, 126],
+        KeyCode::F(10) => vec![27, 91, 50, 49, 126],
+        KeyCode::F(11) => vec![27, 91, 50, 51, 126],
+        KeyCode::F(12) => vec![27, 91, 50, 52, 126],
         _ => vec![],
     }
 }
