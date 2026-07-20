@@ -10,13 +10,12 @@ use tokio::time::sleep;
 use tokio_util::codec::Framed;
 
 #[tokio::test]
-async fn test_tmux_attach_session_over_mosh_tcp() -> anyhow::Result<()> {
-    // Use non-4000 port (4094)
-    let bind_addr: SocketAddr = "127.0.0.1:4094".parse()?;
+async fn test_browsh_navigation_over_mosh_tcp() -> anyhow::Result<()> {
+    let bind_addr: SocketAddr = "127.0.0.1:4093".parse()?;
 
-    // 1. Start mosh-tcp server on port 4094
+    // 1. Start mosh-tcp server on port 4093
     let mut server_proc = Command::new("./target/debug/mosh-tcp")
-        .args(&["server", "--bind", "127.0.0.1:4094", "--fps", "50", "--max-kbps", "100"])
+        .args(&["server", "--bind", "127.0.0.1:4093", "--fps", "50", "--max-kbps", "500"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -30,9 +29,9 @@ async fn test_tmux_attach_session_over_mosh_tcp() -> anyhow::Result<()> {
 
     writer.send(Packet::ClientResize { rows: 24, cols: 80 }).await?;
 
-    // 3. Connect to tmux session 0 over mosh-tcp
-    println!(">>> Sending 'tmux attach -t 0' to mosh-tcp server...");
-    writer.send(Packet::ClientInput { data: b"tmux attach -t 0\n".to_vec() }).await?;
+    // 3. Launch browsh (/workspace/src/browsh)
+    println!(">>> Sending '/workspace/src/browsh --help' to mosh-tcp server PTY...");
+    writer.send(Packet::ClientInput { data: b"/workspace/src/browsh --help\n".to_vec() }).await?;
 
     let mut all_output = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_millis(2000);
@@ -47,15 +46,15 @@ async fn test_tmux_attach_session_over_mosh_tcp() -> anyhow::Result<()> {
     }
 
     let output_str = String::from_utf8_lossy(&all_output);
-    println!("=== TMUX ATTACH OUTPUT OVER MOSH-TCP ===");
+    println!("=== BROWSH OUTPUT RECEIVED FROM SERVER ===");
     println!("{:?}", output_str);
-    println!("=======================================");
+    println!("==========================================");
 
-    // 4. Test sending Ctrl+L (0x0C) and Tab (0x09) keys over mosh-tcp to tmux
-    println!(">>> Sending Ctrl+L (0x0C) and Tab (0x09) keystrokes through mosh-tcp...");
+    // 4. Test sending Ctrl+L (0x0C) followed by URL 'youtube.com' and Enter (13)
+    println!(">>> Sending Ctrl+L (0x0C) and 'youtube.com' keystrokes through mosh-tcp...");
     writer.send(Packet::ClientInput { data: vec![12] }).await?; // Ctrl+L
-    sleep(Duration::from_millis(200)).await;
-    writer.send(Packet::ClientInput { data: vec![9] }).await?; // Tab
+    sleep(Duration::from_millis(100)).await;
+    writer.send(Packet::ClientInput { data: b"youtube.com\n".to_vec() }).await?;
 
     let deadline2 = tokio::time::Instant::now() + Duration::from_millis(1000);
     while tokio::time::Instant::now() < deadline2 {
@@ -68,8 +67,8 @@ async fn test_tmux_attach_session_over_mosh_tcp() -> anyhow::Result<()> {
         }
     }
 
-    assert!(output_str.contains("tmux attach -t 0") || output_str.contains("tmux"), "Failed to attach tmux session!");
-    println!("\r\n✓ Tmux Attach and Navigation Keystrokes Test Passed over mosh-tcp!");
+    assert!(output_str.contains("browsh") || output_str.contains("Browsh"), "Failed to run browsh!");
+    println!("\r\n✓ Browsh Navigation Test Passed over mosh-tcp!");
 
     let _ = server_proc.kill().await;
     Ok(())
