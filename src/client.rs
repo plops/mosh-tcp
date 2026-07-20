@@ -58,15 +58,13 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> any
 
                         let raw_data = key_event_to_bytes(key_event);
                         if !raw_data.is_empty() {
-                            let text = String::from_utf8_lossy(&raw_data);
-                            let clean_text = filter.filter(&text);
-                            let data = clean_text.into_bytes();
+                            let clean_data = filter.filter(&raw_data);
 
-                            if !data.is_empty() {
+                            if !clean_data.is_empty() {
                                 if let Ok(mut pred) = predictor_input.lock() {
-                                    let _ = pred.handle_keystroke(&data);
+                                    let _ = pred.handle_keystroke(&clean_data);
                                 }
-                                let _ = input_tx.blocking_send(Packet::ClientInput { data });
+                                let _ = input_tx.blocking_send(Packet::ClientInput { data: clean_data });
                             }
                         }
                     }
@@ -126,27 +124,26 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> any
 }
 
 struct ResponseFilter {
-    buffer: String,
+    buffer: Vec<u8>,
 }
 
 impl ResponseFilter {
     fn new() -> Self {
-        Self { buffer: String::new() }
+        Self { buffer: Vec::new() }
     }
 
-    fn filter(&mut self, text: &str) -> String {
-        self.buffer.push_str(text);
+    fn filter(&mut self, data: &[u8]) -> Vec<u8> {
+        self.buffer.extend_from_slice(data);
 
-        let mut clean = String::new();
+        let mut clean = Vec::new();
         let mut idx = 0;
-        let bytes = self.buffer.as_bytes();
 
-        while idx < bytes.len() {
+        while idx < self.buffer.len() {
             let slice = &self.buffer[idx..];
 
             // Filter OSC 10 / OSC 11 response patterns: "]10;rgb:..." or "]11;rgb:..."
-            if slice.starts_with("]10;rgb:") || slice.starts_with("]11;rgb:") {
-                if let Some(end) = slice.find(|c| c == '\\' || c == '\x1b' || c == '\r' || c == '\n') {
+            if slice.starts_with(b"]10;rgb:") || slice.starts_with(b"]11;rgb:") {
+                if let Some(end) = slice.iter().position(|&b| b == b'\\' || b == 27 || b == b'\r' || b == b'\n') {
                     idx += end + 1;
                     continue;
                 } else {
@@ -155,21 +152,21 @@ impl ResponseFilter {
             }
 
             // Filter DA response patterns: "0;...c"
-            if slice.starts_with("0;") {
-                if let Some(c_pos) = slice.find('c') {
+            if slice.starts_with(b"0;") {
+                if let Some(c_pos) = slice.iter().position(|&b| b == b'c') {
                     let sub = &slice[..=c_pos];
-                    if sub.chars().all(|ch| ch.is_ascii_digit() || ch == ';' || ch == 'c') {
+                    if sub.iter().all(|&b| b.is_ascii_digit() || b == b';' || b == b'c') {
                         idx += c_pos + 1;
                         continue;
                     }
                 }
             }
 
-            clean.push(bytes[idx] as char);
+            clean.push(self.buffer[idx]);
             idx += 1;
         }
 
-        self.buffer = self.buffer[idx..].to_string();
+        self.buffer = self.buffer[idx..].to_vec();
         clean
     }
 }
@@ -184,6 +181,12 @@ fn key_event_to_bytes(key: event::KeyEvent) -> Vec<u8> {
                 } else {
                     vec![]
                 }
+            } else if key.modifiers.contains(KeyModifiers::ALT) {
+                let mut buf = [0u8; 4];
+                let encoded = c.encode_utf8(&mut buf).as_bytes();
+                let mut res = vec![27];
+                res.extend_from_slice(encoded);
+                res
             } else {
                 let mut buf = [0u8; 4];
                 c.encode_utf8(&mut buf).as_bytes().to_vec()
@@ -216,5 +219,26 @@ fn key_event_to_bytes(key: event::KeyEvent) -> Vec<u8> {
         KeyCode::F(11) => vec![27, 91, 50, 51, 126],
         KeyCode::F(12) => vec![27, 91, 50, 52, 126],
         _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_response_filter_multibyte_utf8() {
+        let mut filter = ResponseFilter::new();
+        // 'ø' is 2 bytes: [0xC3, 0xB8]
+        let input = "ø".as_bytes();
+        let cleaned = filter.filter(input);
+        assert_eq!(cleaned, input);
+    }
+
+    #[test]
+    fn test_alt_key_event_encoding() {
+        let key = event::KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT);
+        let bytes = key_event_to_bytes(key);
+        assert_eq!(bytes, vec![27, b'x']);
     }
 }
