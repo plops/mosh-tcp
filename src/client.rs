@@ -1,5 +1,7 @@
 use crate::predictive::LocalPredictor;
 use crate::protocol::{Packet, PacketCodec};
+#[allow(unused_imports)]
+use crossterm::event::MouseEvent;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
     MouseEventKind,
