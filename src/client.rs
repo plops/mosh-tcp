@@ -1,6 +1,10 @@
 use crate::predictive::LocalPredictor;
 use crate::protocol::{Packet, PacketCodec};
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
+    MouseEventKind,
+};
+use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
@@ -20,10 +24,12 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> any
     impl Drop for RawModeGuard {
         fn drop(&mut self) {
             let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), DisableMouseCapture);
         }
     }
 
     enable_raw_mode()?;
+    let _ = execute!(io::stdout(), EnableMouseCapture);
     let _guard = RawModeGuard;
 
     let framed = Framed::new(socket, PacketCodec::new());
@@ -69,6 +75,12 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> any
                                 }
                                 let _ = input_tx.blocking_send(Packet::ClientInput { data: clean_data });
                             }
+                        }
+                    }
+                    Ok(Event::Mouse(mouse_event)) => {
+                        let mouse_data = mouse_event_to_bytes(mouse_event);
+                        if !mouse_data.is_empty() {
+                            let _ = input_tx.blocking_send(Packet::ClientInput { data: mouse_data });
                         }
                     }
                     Ok(Event::Resize(cols, rows)) => {
@@ -177,6 +189,45 @@ impl ResponseFilter {
     }
 }
 
+fn mouse_event_to_bytes(mouse: event::MouseEvent) -> Vec<u8> {
+    let col = mouse.column + 1;
+    let row = mouse.row + 1;
+
+    let (base_button, is_release) = match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => (0, false),
+        MouseEventKind::Down(MouseButton::Middle) => (1, false),
+        MouseEventKind::Down(MouseButton::Right) => (2, false),
+        MouseEventKind::Up(MouseButton::Left) => (0, true),
+        MouseEventKind::Up(MouseButton::Middle) => (1, true),
+        MouseEventKind::Up(MouseButton::Right) => (2, true),
+        MouseEventKind::Drag(MouseButton::Left) => (32, false),
+        MouseEventKind::Drag(MouseButton::Middle) => (33, false),
+        MouseEventKind::Drag(MouseButton::Right) => (34, false),
+        MouseEventKind::Moved => (35, false),
+        MouseEventKind::ScrollUp => (64, false),
+        MouseEventKind::ScrollDown => (65, false),
+        MouseEventKind::ScrollLeft => (66, false),
+        MouseEventKind::ScrollRight => (67, false),
+    };
+
+    let mut modifier_bits = 0;
+    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+        modifier_bits += 4;
+    }
+    if mouse.modifiers.contains(KeyModifiers::ALT) {
+        modifier_bits += 8;
+    }
+    if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+        modifier_bits += 16;
+    }
+
+    let button_code = base_button + modifier_bits;
+
+    // SGR 1006 extended mouse encoding format: \x1b[<b;c;rM (or m for release)
+    let final_char = if is_release { 'm' } else { 'M' };
+    format!("\x1b[<{};{};{}{}", button_code, col, row, final_char).into_bytes()
+}
+
 fn key_event_to_bytes(key: event::KeyEvent) -> Vec<u8> {
     match key.code {
         KeyCode::Char(c) => {
@@ -235,7 +286,6 @@ mod tests {
     #[test]
     fn test_response_filter_multibyte_utf8() {
         let mut filter = ResponseFilter::new();
-        // 'ø' is 2 bytes: [0xC3, 0xB8]
         let input = "ø".as_bytes();
         let cleaned = filter.filter(input);
         assert_eq!(cleaned, input);
@@ -246,5 +296,32 @@ mod tests {
         let key = event::KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT);
         let bytes = key_event_to_bytes(key);
         assert_eq!(bytes, vec![27, b'x']);
+    }
+
+    #[test]
+    fn test_sgr_mouse_event_encoding() {
+        let mouse_down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(mouse_event_to_bytes(mouse_down), b"\x1b[<0;11;6M");
+
+        let mouse_up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(mouse_event_to_bytes(mouse_up), b"\x1b[<0;11;6m");
+
+        let mouse_move = MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 15,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(mouse_event_to_bytes(mouse_move), b"\x1b[<35;16;9M");
     }
 }
