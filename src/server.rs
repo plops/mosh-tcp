@@ -1,3 +1,4 @@
+use crate::ansi::{find_safe_split_point, strip_terminal_queries_stateful};
 use crate::protocol::{Packet, PacketCodec};
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
@@ -21,6 +22,21 @@ pub struct Telemetry {
     pub frames_skipped: AtomicU64,
     pub rtt_ms: AtomicU64,
 }
+
+pub struct ServerSessionState {
+    pub vt_parser: Vt100Parser,
+    pub pty_buffer: Vec<u8>,
+}
+
+impl ServerSessionState {
+    pub fn new(rows: u16, cols: u16) -> Self {
+        Self {
+            vt_parser: Vt100Parser::new(rows, cols, 1000),
+            pty_buffer: Vec::new(),
+        }
+    }
+}
+
 
 pub async fn run_server(
     bind_addr: SocketAddr,
@@ -91,12 +107,9 @@ async fn handle_client(
     let pty_writer = Arc::new(Mutex::new(pair.master.take_writer()?));
     let master_pair = Arc::new(Mutex::new(pair.master));
 
-    let vt_parser = Arc::new(Mutex::new(Vt100Parser::new(24, 80, 1000)));
-    let pty_buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let session_state = Arc::new(Mutex::new(ServerSessionState::new(24, 80)));
 
-    let vt_parser_pty = Arc::clone(&vt_parser);
-    let pty_buffer_clone = Arc::clone(&pty_buffer);
-
+    let state_pty = Arc::clone(&session_state);
     let telemetry = Arc::new(Telemetry::default());
     let telemetry_pty = Arc::clone(&telemetry);
 
@@ -109,20 +122,18 @@ async fn handle_client(
                     let chunk = &buf[..n];
                     telemetry_pty.pty_bytes_in.fetch_add(n as u64, Ordering::Relaxed);
 
-                    // 1. Process bytes in VT100 virtual screen emulator safely
-                    if let Ok(mut vt) = vt_parser_pty.lock() {
+                    if let Ok(mut state) = state_pty.lock() {
+                        // 1. Process bytes in VT100 virtual screen emulator safely
                         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            vt.process(chunk);
+                            state.vt_parser.process(chunk);
                         }));
                         if res.is_err() {
-                            let (r, c) = vt.screen().size();
-                            *vt = Vt100Parser::new(r, c, 1000);
+                            let (r, c) = state.vt_parser.screen().size();
+                            state.vt_parser = Vt100Parser::new(r, c, 1000);
                         }
-                    }
 
-                    // 2. Accumulate raw bytes for low-latency direct pass-through
-                    if let Ok(mut guard) = pty_buffer_clone.lock() {
-                        guard.extend_from_slice(chunk);
+                        // 2. Accumulate raw bytes for low-latency direct pass-through
+                        state.pty_buffer.extend_from_slice(chunk);
                     }
                 }
                 Err(_) => break,
@@ -133,8 +144,7 @@ async fn handle_client(
     let framed = Framed::new(socket, PacketCodec::new());
     let (mut writer, mut reader) = framed.split();
 
-    let pty_buffer_task = Arc::clone(&pty_buffer);
-    let vt_parser_task = Arc::clone(&vt_parser);
+    let state_send = Arc::clone(&session_state);
     let telemetry_send = Arc::clone(&telemetry);
     let telemetry_stats = Arc::clone(&telemetry);
 
@@ -207,12 +217,12 @@ async fn handle_client(
             tokens = (tokens + max_bytes_per_sec * elapsed_secs).min(burst_capacity);
 
             let raw_data_opt = {
-                if let Ok(mut guard) = pty_buffer_task.lock() {
-                    if guard.len() > MAX_PTY_BUFFER_CAP {
+                if let Ok(mut state) = state_send.lock() {
+                    if state.pty_buffer.len() > MAX_PTY_BUFFER_CAP {
                         // Buffer overflow detected (e.g. Carbonyl/Browsh heavy page render or large text dump)!
                         // Discard raw buffer, record dropped bytes, and queue an atomic VT100 2D screen refresh.
-                        let dropped_len = guard.len();
-                        guard.clear();
+                        let dropped_len = state.pty_buffer.len();
+                        state.pty_buffer.clear();
                         telemetry_send.bytes_dropped.fetch_add(dropped_len as u64, Ordering::Relaxed);
                         pending_atomic_refresh = true;
                     }
@@ -222,29 +232,24 @@ async fn handle_client(
                         telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
                         None
                     } else if pending_atomic_refresh {
-                        guard.clear();
+                        state.pty_buffer.clear();
                         pending_atomic_refresh = false;
-                        if let Ok(vt) = vt_parser_task.lock() {
-                            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                generate_atomic_screen_frame(&vt)
-                            }));
-                            match res {
-                                Ok(atomic_frame) => Some(atomic_frame),
-                                Err(_) => {
-                                    telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
-                                    None
-                                }
+                        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            generate_atomic_screen_frame(&state.vt_parser)
+                        }));
+                        match res {
+                            Ok(atomic_frame) => Some(atomic_frame),
+                            Err(_) => {
+                                telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
+                                None
                             }
-                        } else {
-                            telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
-                            None
                         }
-                    } else if guard.is_empty() {
+                    } else if state.pty_buffer.is_empty() {
                         None
                     } else {
                         // Normal throughput: apply query stripping and send clean raw chunk
-                        let (cleaned, remaining) = strip_terminal_queries_stateful(&guard);
-                        *guard = remaining;
+                        let (cleaned, remaining) = strip_terminal_queries_stateful(&state.pty_buffer);
+                        state.pty_buffer = remaining;
 
                         if cleaned.is_empty() {
                             None
@@ -257,14 +262,14 @@ async fn handle_client(
                                 if split_point < available {
                                     let rest = &cleaned[split_point..];
                                     let mut new_guard = rest.to_vec();
-                                    new_guard.extend_from_slice(&guard);
-                                    *guard = new_guard;
+                                    new_guard.extend_from_slice(&state.pty_buffer);
+                                    state.pty_buffer = new_guard;
                                 }
                                 Some(chunk)
                             } else {
                                 let mut new_guard = cleaned;
-                                new_guard.extend_from_slice(&guard);
-                                *guard = new_guard;
+                                new_guard.extend_from_slice(&state.pty_buffer);
+                                state.pty_buffer = new_guard;
                                 telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
                                 None
                             }
@@ -298,7 +303,7 @@ async fn handle_client(
     });
 
     let master_resize = Arc::clone(&master_pair);
-    let vt_parser_resize = Arc::clone(&vt_parser);
+    let state_resize = Arc::clone(&session_state);
     let pty_writer_input = Arc::clone(&pty_writer);
     let telemetry_ping = Arc::clone(&telemetry);
 
@@ -321,8 +326,8 @@ async fn handle_client(
                         pixel_height: 0,
                     });
                 }
-                if let Ok(mut vt) = vt_parser_resize.lock() {
-                    *vt = Vt100Parser::new(rows, cols, 1000);
+                if let Ok(mut state) = state_resize.lock() {
+                    state.vt_parser = Vt100Parser::new(rows, cols, 1000);
                 }
             }
             Ok(Packet::Ping { timestamp }) => {
@@ -371,127 +376,3 @@ fn generate_atomic_screen_frame(parser: &Vt100Parser) -> Vec<u8> {
     frame
 }
 
-fn find_safe_split_point(buf: &[u8], target: usize) -> usize {
-    if target >= buf.len() {
-        return buf.len();
-    }
-    if target == 0 {
-        return 0;
-    }
-
-    let mut safe_points = Vec::new();
-    safe_points.push(0);
-
-    let mut i = 0;
-    while i < buf.len() {
-        if buf[i] == 0x1b {
-            i += 1;
-            if i < buf.len() {
-                if buf[i] == b'[' {
-                    i += 1;
-                    while i < buf.len() {
-                        let b = buf[i];
-                        i += 1;
-                        if (0x40..=0x7E).contains(&b) {
-                            break;
-                        }
-                    }
-                } else if buf[i] == b']' {
-                    i += 1;
-                    while i < buf.len() {
-                        if buf[i] == 0x07 {
-                            i += 1;
-                            break;
-                        } else if buf[i] == 0x1b && i + 1 < buf.len() && buf[i + 1] == b'\\' {
-                            i += 2;
-                            break;
-                        }
-                        i += 1;
-                    }
-                } else {
-                    i += 1;
-                }
-            }
-            safe_points.push(i);
-        } else {
-            let b = buf[i];
-            if b < 0x80 || b >= 0xC0 {
-                safe_points.push(i);
-            }
-            i += 1;
-        }
-    }
-    safe_points.push(buf.len());
-
-    let mut best = 0;
-    for &pt in &safe_points {
-        if pt <= target {
-            best = pt;
-        } else {
-            break;
-        }
-    }
-    best
-}
-
-fn strip_terminal_queries_stateful(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
-    let mut result = Vec::with_capacity(data.len());
-    let mut i = 0;
-    while i < data.len() {
-        if i + 5 <= data.len() && (&data[i..i + 5] == b"\x1b]10;" || &data[i..i + 5] == b"\x1b]11;") {
-            let mut j = i + 5;
-            let mut found_st = false;
-            while j < data.len() {
-                if data[j] == 0x07 {
-                    j += 1;
-                    found_st = true;
-                    break;
-                } else if data[j] == 0x1b && j + 1 < data.len() && data[j + 1] == b'\\' {
-                    j += 2;
-                    found_st = true;
-                    break;
-                }
-                j += 1;
-            }
-            if found_st {
-                i = j;
-                continue;
-            } else {
-                return (result, data[i..].to_vec());
-            }
-        }
-
-        if data[i] == 0x1b {
-            if i + 1 == data.len() {
-                return (result, data[i..].to_vec());
-            }
-            let next = data[i + 1];
-            if next == b'[' {
-                let mut j = i + 2;
-                let mut found_end = false;
-                while j < data.len() {
-                    let b = data[j];
-                    if (0x40..=0x7E).contains(&b) {
-                        found_end = true;
-                        j += 1;
-                        break;
-                    }
-                    j += 1;
-                }
-                if found_end {
-                    let sub = &data[i..j];
-                    if sub == b"\x1b[c" || sub == b"\x1b[0c" || sub == b"\x1b[>c" || sub == b"\x1b[>0c" || sub == b"\x1b[>q" {
-                        i = j;
-                        continue;
-                    }
-                } else {
-                    return (result, data[i..].to_vec());
-                }
-            }
-        }
-
-        result.push(data[i]);
-        i += 1;
-    }
-    (result, Vec::new())
-}

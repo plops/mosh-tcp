@@ -1,6 +1,7 @@
 use std::io::{self, Write};
 use crossterm::style::{Attribute, SetAttribute};
 use vt100::Parser as Vt100Parser;
+use crate::ansi::contains_subslice;
 
 #[derive(Debug, Clone)]
 pub struct PredictedCell {
@@ -220,10 +221,6 @@ impl LocalPredictor {
     fn become_tentative(&mut self) {
         self.prediction_epoch += 1;
     }
-}
-
-fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|window| window == needle)
 }
 
 #[cfg(test)]
