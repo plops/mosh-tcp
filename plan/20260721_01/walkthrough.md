@@ -37,6 +37,11 @@ Key achievements:
 ### C. Tokio `current_thread` Runtime ([`src/bin/mosh_tcp_client.rs`](file:///workspace/src/mosh-tcp/src/bin/mosh_tcp_client.rs))
 - **Refactoring**: Configured `mosh-tcp-client` main entry point with `#[tokio::main(flavor = "current_thread")]`.
 
+### D. Release Build & UPX Compression Script ([`build_release.sh`](file:///workspace/src/mosh-tcp/build_release.sh))
+- Updated `build_release.sh` to automatically build `mosh-tcp-client` (`--no-default-features --features client --bin mosh-tcp-client`), `mosh-tcp-server`, and `mosh-tcp`.
+- Configured UPX compression (`upx --best --lzma`) for all targets when UPX is available.
+
+
 ---
 
 ## 2. Architecture & Code Cleanup
