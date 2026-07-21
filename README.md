@@ -183,4 +183,5 @@ cargo test
 
 ## 📜 License
 
-Licensed under MIT.
+Licensed under the **GNU General Public License v3.0 (GPLv3)**. See [LICENSE](file:///workspace/src/mosh-tcp/LICENSE) for details.
+
