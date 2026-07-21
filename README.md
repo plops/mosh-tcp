@@ -25,10 +25,14 @@ Ein in **Rust** geschriebenes, latenztolerantes Terminal-Tool (Client & Server) 
 
 ```bash
 cd /workspace/src/mosh-tcp
-cargo build --release
+./build_release.sh
 ```
 
-Das fertige Binary befindet sich in `target/release/mosh-tcp`.
+Die fertigen Binaries befinden sich in:
+* `target/release/mosh-tcp-client` (Standalone Rust client, ~219 KB UPX)
+* `clients/c/mosh-tcp-client-c` (Standalone C99 client, ~14 KB UPX)
+* `clients/cpp/mosh-tcp-client-cpp` (Standalone Modern C++20 client, ~19 KB UPX)
+* `target/release/mosh-tcp-server` (Server, ~284 KB UPX)
 
 ---
 
@@ -37,7 +41,7 @@ Das fertige Binary befindet sich in `target/release/mosh-tcp`.
 ### 1. Server auf dem Remote-Server starten
 
 ```bash
-./target/release/mosh-tcp server --bind 0.0.0.0:4000 --fps 50
+./mosh-tcp-server --bind 0.0.0.0:4000 --fps 50
 ```
 
 Optionen:
@@ -47,11 +51,18 @@ Optionen:
 
 ---
 
-### 2. Verbinden vom Client (Linux Laptop)
+### 2. Verbinden vom Client
 
 #### Option A: Direkt über TCP (z.B. im selben VPN oder mit öffentlicher Server-IP)
 ```bash
-./target/release/mosh-tcp client --connect <SERVER_IP>:4000
+# Rust Client:
+./mosh-tcp-client --connect <SERVER_IP>:4000
+
+# C Client (OpenWrt / Embedded):
+./mosh-tcp-client-c --connect <SERVER_IP>:4000
+
+# C++ Client:
+./mosh-tcp-client-cpp --connect <SERVER_IP>:4000
 ```
 
 #### Option B: Über SSH-Tunnel (Empfohlen bei CGNAT auf Server- oder Client-Seite)
@@ -61,20 +72,22 @@ Optionen:
    ```
 2. **`mosh-tcp` lokal verbinden:**
    ```bash
-   ./target/release/mosh-tcp client --connect 127.0.0.1:4000
+   ./mosh-tcp-client --connect 127.0.0.1:4000
    ```
 
 Optionen für den Client:
 * `--connect <IP:PORT>`: Ziel-Adresse des Servers (Standard: `127.0.0.1:4000`).
-* `--no-predict`: Deaktiviert das lokale Predictive Echo.
-* **Beenden:** Mit `Ctrl + Q` kann der Client jederzeit beendet werden.
+* `--predict`: Aktiviert das lokale Predictive Echo (Rust Client).
 
 ---
 
 ## Projektstruktur
 
-* `src/main.rs`: CLI Argument Parsing mit `clap`.
+* `clients/c/`: Standalone POSIX C99/C11 Client (`mosh_tcp_client.c`, zero-dependency `puff.c` Decompressor, Makefile).
+* `clients/cpp/`: Standalone Modern C++20 Client (`mosh_tcp_client.cpp`, RAII `TerminalGuard`, `std::span`, Makefile).
+* `src/bin/mosh_tcp_client.rs`: Standalone Rust Client-Einstiegspunkt.
+* `src/bin/mosh_tcp_server.rs`: Server-Einstiegspunkt (Tokio async runtime, PTY management).
 * `src/server.rs`: PTY-Spawn (`portable-pty`), 20ms Timer Loop, Frame-Akkumulation & Komprimierung.
 * `src/client.rs`: Raw-Mode Terminal-Steuerung (`crossterm`), Event-Loop & Frame-Rendering.
-* `src/protocol.rs`: Binäres Paket-Format (`bincode` & `tokio-util` Length-Prefixed Codec).
-* `src/predictive.rs`: Lokales Predictive Echo Engine.
+* `src/protocol.rs`: Binäres Paket-Format (Length-Prefixed Codec & Deflate Compression).
+* `src/predictive.rs`: Lokales 2D Cell Predictive Echo Engine.

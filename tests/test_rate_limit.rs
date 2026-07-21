@@ -22,8 +22,8 @@ async fn test_bandwidth_throttling_and_frame_skipping() -> anyhow::Result<()> {
     let bind_str = bind_addr.to_string();
 
     // 1. Launch server with 6 KB/s max bandwidth limit and --stats enabled
-    let mut server_proc = Command::new("./target/debug/mosh-tcp")
-        .args(&["server", "--bind", &bind_str, "--max-kbps", "6", "--stats"])
+    let mut server_proc = Command::new("./target/debug/mosh-tcp-server")
+        .args(&["--bind", &bind_str, "--max-kbps", "6", "--stats"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -83,8 +83,8 @@ async fn test_carbonyl_ansi_heavy_rate_limit() -> anyhow::Result<()> {
     let bind_str = bind_addr.to_string();
 
     // 1. Launch server with 6 KB/s max bandwidth limit
-    let mut server_proc = Command::new("./target/debug/mosh-tcp")
-        .args(&["server", "--bind", &bind_str, "--max-kbps", "6", "--stats"])
+    let mut server_proc = Command::new("./target/debug/mosh-tcp-server")
+        .args(&["--bind", &bind_str, "--max-kbps", "6", "--stats"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;

@@ -59,8 +59,8 @@ async fn test_server_editing_and_heavy_output() -> anyhow::Result<()> {
     let bind_str = bind_addr.to_string();
 
     // Launch server binary in background with 1000 KB/s cap for fast throughput test
-    let mut server_proc = Command::new("./target/debug/mosh-tcp")
-        .args(&["server", "--bind", &bind_str, "--fps", "50", "--max-kbps", "1000"])
+    let mut server_proc = Command::new("./target/debug/mosh-tcp-server")
+        .args(&["--bind", &bind_str, "--fps", "50", "--max-kbps", "1000"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;

@@ -22,8 +22,8 @@ async fn test_browsh_navigation_over_mosh_tcp() -> anyhow::Result<()> {
     let bind_str = bind_addr.to_string();
 
     // 1. Start mosh-tcp server
-    let mut server_proc = Command::new("./target/debug/mosh-tcp")
-        .args(&["server", "--bind", &bind_str, "--fps", "50", "--max-kbps", "500"])
+    let mut server_proc = Command::new("./target/debug/mosh-tcp-server")
+        .args(&["--bind", &bind_str, "--fps", "50", "--max-kbps", "500"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;

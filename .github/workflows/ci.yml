@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install UPX & build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y upx build-essential
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build C client
+        run: make -C clients/c clean all
+
+      - name: Build C++ client
+        run: make -C clients/cpp clean all
+
+      - name: Run Sanitizer Audits
+        run: |
+          make -C clients/c clean sanitizer
+          make -C clients/cpp clean sanitizer
+          make -C clients/c clean all
+          make -C clients/cpp clean all
+
+      - name: Run Full Test Suite (Rust, C, C++ Matrix)
+        run: cargo test -- --nocapture

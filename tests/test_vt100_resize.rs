@@ -22,8 +22,8 @@ async fn test_vt100_resize_with_wide_characters_does_not_panic() -> anyhow::Resu
     let bind_str = bind_addr.to_string();
 
     // 1. Launch server
-    let mut server_proc = Command::new("./target/debug/mosh-tcp")
-        .args(&["server", "--bind", &bind_str, "--stats"])
+    let mut server_proc = Command::new("./target/debug/mosh-tcp-server")
+        .args(&["--bind", &bind_str, "--stats"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;

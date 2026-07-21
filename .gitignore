@@ -1,1 +1,4 @@
 /target
+*.o
+clients/c/mosh-tcp-client-c
+clients/cpp/mosh-tcp-client-cpp

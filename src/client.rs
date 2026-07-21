@@ -8,7 +8,7 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -30,7 +30,7 @@ pub fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io::Resul
         }
     }
 
-    enable_raw_mode()?;
+    let _ = enable_raw_mode();
     let _ = execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
     let _guard = RawModeGuard;
 
@@ -54,53 +54,70 @@ pub fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io::Resul
 
     std::thread::spawn(move || {
         let mut filter = ResponseFilter::new();
+        let is_tty = crossterm::tty::IsTty::is_tty(&std::io::stdin());
 
         while running_clone.load(Ordering::Relaxed) {
-            if event::poll(std::time::Duration::from_millis(20)).unwrap_or(false) {
-                match event::read() {
-                    Ok(Event::Key(key_event)) => {
-                        if key_event.code == KeyCode::Char('q')
-                            && key_event.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            running_clone.store(false, Ordering::Relaxed);
-                            break;
-                        }
+            if is_tty {
+                if event::poll(std::time::Duration::from_millis(20)).unwrap_or(false) {
+                    match event::read() {
+                        Ok(Event::Key(key_event)) => {
+                            if key_event.code == KeyCode::Char('q')
+                                && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                            {
+                                running_clone.store(false, Ordering::Relaxed);
+                                break;
+                            }
 
-                        let raw_data = key_event_to_bytes(key_event);
-                        if !raw_data.is_empty() {
-                            let clean_data = filter.filter(&raw_data);
+                            let raw_data = key_event_to_bytes(key_event);
+                            if !raw_data.is_empty() {
+                                let clean_data = filter.filter(&raw_data);
 
-                            if !clean_data.is_empty() {
-                                if let Ok(mut pred) = predictor_input.lock() {
-                                    let _ = pred.handle_keystroke(&clean_data);
+                                if !clean_data.is_empty() {
+                                    if let Ok(mut pred) = predictor_input.lock() {
+                                        let _ = pred.handle_keystroke(&clean_data);
+                                    }
+                                    let _ = input_tx.send(Packet::ClientInput { data: clean_data });
                                 }
-                                let _ = input_tx.send(Packet::ClientInput { data: clean_data });
                             }
                         }
-                    }
-                    Ok(Event::Paste(text)) => {
-                        if !text.is_empty() {
+                        Ok(Event::Paste(text)) => {
+                            if !text.is_empty() {
+                                if let Ok(mut pred) = predictor_input.lock() {
+                                    pred.reset();
+                                }
+                                let _ = input_tx.send(Packet::ClientInput {
+                                    data: text.into_bytes(),
+                                });
+                            }
+                        }
+                        Ok(Event::Mouse(mouse_event)) => {
+                            let mouse_data = mouse_event_to_bytes(mouse_event);
+                            if !mouse_data.is_empty() {
+                                let _ = input_tx.send(Packet::ClientInput { data: mouse_data });
+                            }
+                        }
+                        Ok(Event::Resize(cols, rows)) => {
                             if let Ok(mut pred) = predictor_input.lock() {
-                                pred.reset();
+                                pred.set_size(rows, cols);
                             }
-                            let _ = input_tx.send(Packet::ClientInput {
-                                data: text.into_bytes(),
-                            });
+                            let _ = input_tx.send(Packet::ClientResize { rows, cols });
                         }
+                        _ => {}
                     }
-                    Ok(Event::Mouse(mouse_event)) => {
-                        let mouse_data = mouse_event_to_bytes(mouse_event);
-                        if !mouse_data.is_empty() {
-                            let _ = input_tx.send(Packet::ClientInput { data: mouse_data });
-                        }
+                }
+            } else {
+                let mut buf = [0u8; 4096];
+                match std::io::stdin().read(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        let _ = input_tx.send(Packet::ClientInput { data: buf[..n].to_vec() });
                     }
-                    Ok(Event::Resize(cols, rows)) => {
-                        if let Ok(mut pred) = predictor_input.lock() {
-                            pred.set_size(rows, cols);
-                        }
-                        let _ = input_tx.send(Packet::ClientResize { rows, cols });
+                    Ok(_) => {
+                        running_clone.store(false, Ordering::Relaxed);
+                        break;
                     }
-                    _ => {}
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
                 }
             }
         }

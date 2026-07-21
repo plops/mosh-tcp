@@ -1,15 +1,11 @@
 [package]
 name = "mosh-tcp"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 
 [lib]
 name = "mosh_tcp"
 path = "src/lib.rs"
-
-[[bin]]
-name = "mosh-tcp"
-path = "src/main.rs"
 
 [[bin]]
 name = "mosh-tcp-client"

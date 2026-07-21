@@ -9,11 +9,11 @@ This document describes the automated release workflow for `mosh-tcp`.
 `mosh-tcp` uses GitHub Actions (`.github/workflows/release.yml`) to automatically build Linux release binaries and publish release assets whenever a git tag matching `v*` (e.g. `v0.2.0`) is pushed to GitHub or triggered manually via `workflow_dispatch`.
 
 ### Release Artifacts Published
-Each GitHub Release contains:
-- `mosh-tcp-client-linux-amd64` — Direct standalone UPX-compressed client executable (~258 KB) for fast downloading on slow network connections without requiring extraction tools.
-- `mosh-tcp-client-linux-amd64.tar.xz` — `tar.xz` archive containing the UPX-compressed client binary and documentation.
-- `mosh-tcp-server-linux-amd64.tar.gz` — Tarball containing the server binary (`mosh-tcp-server`) and documentation.
-- `mosh-tcp-linux-amd64.tar.gz` — Tarball containing the unified client/server release binary (`mosh-tcp`) and documentation.
+Each GitHub Release contains the following artifacts:
+- `mosh-tcp-client-linux-amd64` — Standalone UPX-compressed Rust client executable (~219 KB).
+- `mosh-tcp-client-c-linux-amd64` — Ultra-lightweight POSIX C99/C11 UPX-compressed client (~14 KB).
+- `mosh-tcp-client-cpp-linux-amd64` — Modern C++20 UPX-compressed client (~19 KB).
+- `mosh-tcp-linux-amd64.tar.gz` — Unified tarball archive containing all client binaries (`mosh-tcp-client`, `mosh-tcp-client-c`, `mosh-tcp-client-cpp`), server (`mosh-tcp-server`), and documentation.
 - **Automated Collated Release Notes** — Published directly on the GitHub Release webpage.
 
 
