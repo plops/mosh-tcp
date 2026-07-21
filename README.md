@@ -148,6 +148,8 @@ Built binaries will be located in:
 
 ## 🛠️ Architecture & Project Structure
 
+* Detailed Architectural Document: [`doc/architecture.md`](doc/architecture.md)
+
 ```text
 mosh-tcp/
 ├── src/
@@ -168,6 +170,14 @@ mosh-tcp/
 └── build_release.sh             # Unified compilation & UPX packaging script
 ```
 
+### Key Components
+
+* [`src/`](src/): Server and client Rust core modules.
+* [`clients/c/`](clients/c/): Standalone POSIX C99 client implementation with zero external dependencies.
+* [`clients/cpp/`](clients/cpp/): Modern C++20 client implementation with zero external dependencies.
+* [`doc/architecture.md`](doc/architecture.md): Deep-dive architectural specification and data flow diagrams.
+* [`build_release.sh`](build_release.sh): Build script for producing UPX-compressed release binaries.
+
 ---
 
 ## 🧪 Testing
@@ -183,5 +193,4 @@ cargo test
 
 ## 📜 License
 
-Licensed under the **GNU General Public License v3.0 (GPLv3)**. See [LICENSE](file:///workspace/src/mosh-tcp/LICENSE) for details.
-
+Licensed under the **GNU General Public License v3.0 (GPLv3)**. See [LICENSE](LICENSE) for details.
