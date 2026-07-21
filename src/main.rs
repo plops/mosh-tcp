@@ -1,4 +1,3 @@
-use mosh_tcp::{client, server};
 use std::env;
 use std::net::SocketAddr;
 
@@ -11,6 +10,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match args[1].as_str() {
+        #[cfg(feature = "server")]
         "server" => {
             let mut bind: SocketAddr = "0.0.0.0:4000".parse().unwrap();
             let mut fps = 50u64;
@@ -52,8 +52,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 i += 1;
             }
-            server::run_server(bind, fps, max_kbps, stats, shell).await?;
+            mosh_tcp::server::run_server(bind, fps, max_kbps, stats, shell).await?;
         }
+        #[cfg(feature = "client")]
         "client" => {
             let mut connect: SocketAddr = "127.0.0.1:4000".parse().unwrap();
             let mut predict = false;
@@ -74,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 i += 1;
             }
-            client::run_client(connect, predict).await?;
+            mosh_tcp::client::run_client(connect, predict).await?;
         }
         _ => print_usage(),
     }
