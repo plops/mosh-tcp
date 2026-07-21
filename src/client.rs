@@ -3,7 +3,7 @@ use crate::protocol::{Packet, PacketCodec};
 #[allow(unused_imports)]
 use crossterm::event::MouseEvent;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
+    self, DisableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
     MouseEventKind,
 };
 use crossterm::execute;
@@ -26,12 +26,16 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> any
     impl Drop for RawModeGuard {
         fn drop(&mut self) {
             let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), DisableMouseCapture);
+            let _ = execute!(
+                io::stdout(),
+                crossterm::event::DisableBracketedPaste,
+                DisableMouseCapture
+            );
         }
     }
 
     enable_raw_mode()?;
-    let _ = execute!(io::stdout(), EnableMouseCapture);
+    let _ = execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
     let _guard = RawModeGuard;
 
     let framed = Framed::new(socket, PacketCodec::new());
@@ -77,6 +81,16 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> any
                                 }
                                 let _ = input_tx.blocking_send(Packet::ClientInput { data: clean_data });
                             }
+                        }
+                    }
+                    Ok(Event::Paste(text)) => {
+                        if !text.is_empty() {
+                            if let Ok(mut pred) = predictor_input.lock() {
+                                pred.reset();
+                            }
+                            let _ = input_tx.blocking_send(Packet::ClientInput {
+                                data: text.into_bytes(),
+                            });
                         }
                     }
                     Ok(Event::Mouse(mouse_event)) => {
@@ -325,5 +339,15 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         assert_eq!(mouse_event_to_bytes(mouse_move), b"\x1b[<35;16;9M");
+    }
+
+    #[test]
+    fn test_paste_event_resets_predictor() {
+        let mut pred = LocalPredictor::new(true);
+        let _ = pred.handle_keystroke(b"hello");
+        assert!(pred.active_predictions() > 0);
+
+        pred.reset();
+        assert_eq!(pred.active_predictions(), 0);
     }
 }

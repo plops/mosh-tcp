@@ -109,9 +109,15 @@ async fn handle_client(
                     let chunk = &buf[..n];
                     telemetry_pty.pty_bytes_in.fetch_add(n as u64, Ordering::Relaxed);
 
-                    // 1. Process bytes in VT100 virtual screen emulator
+                    // 1. Process bytes in VT100 virtual screen emulator safely
                     if let Ok(mut vt) = vt_parser_pty.lock() {
-                        vt.process(chunk);
+                        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            vt.process(chunk);
+                        }));
+                        if res.is_err() {
+                            let (r, c) = vt.screen().size();
+                            *vt = Vt100Parser::new(r, c, 1000);
+                        }
                     }
 
                     // 2. Accumulate raw bytes for low-latency direct pass-through
@@ -188,6 +194,7 @@ async fn handle_client(
 
         let mut seq: u64 = 0;
         let mut last_tick = Instant::now();
+        let mut pending_atomic_refresh = false;
 
         const MAX_PTY_BUFFER_CAP: usize = 16384;
 
@@ -201,22 +208,39 @@ async fn handle_client(
 
             let raw_data_opt = {
                 if let Ok(mut guard) = pty_buffer_task.lock() {
-                    if guard.is_empty() {
-                        None
-                    } else if guard.len() > MAX_PTY_BUFFER_CAP {
-                        // Buffer overflow detected (e.g. Browsh heavy page render or large text dump)!
-                        // Discard raw buffer and generate a 100% ATOMIC, UNCORRUPTED VT100 2D screen frame!
+                    if guard.len() > MAX_PTY_BUFFER_CAP {
+                        // Buffer overflow detected (e.g. Carbonyl/Browsh heavy page render or large text dump)!
+                        // Discard raw buffer, record dropped bytes, and queue an atomic VT100 2D screen refresh.
                         let dropped_len = guard.len();
                         guard.clear();
                         telemetry_send.bytes_dropped.fetch_add(dropped_len as u64, Ordering::Relaxed);
-                        telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
+                        pending_atomic_refresh = true;
+                    }
 
+                    if tokens <= 0.0 {
+                        // Bandwidth quota exhausted: strictly suppress sending network frames.
+                        telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
+                        None
+                    } else if pending_atomic_refresh {
+                        guard.clear();
+                        pending_atomic_refresh = false;
                         if let Ok(vt) = vt_parser_task.lock() {
-                            let atomic_frame = generate_atomic_screen_frame(&vt);
-                            Some(atomic_frame)
+                            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                generate_atomic_screen_frame(&vt)
+                            }));
+                            match res {
+                                Ok(atomic_frame) => Some(atomic_frame),
+                                Err(_) => {
+                                    telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
+                                    None
+                                }
+                            }
                         } else {
+                            telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
                             None
                         }
+                    } else if guard.is_empty() {
+                        None
                     } else {
                         // Normal throughput: apply query stripping and send clean raw chunk
                         let (cleaned, remaining) = strip_terminal_queries_stateful(&guard);
@@ -287,6 +311,8 @@ async fn handle_client(
                 }
             }
             Ok(Packet::ClientResize { rows, cols }) => {
+                let rows = rows.max(1);
+                let cols = cols.max(1);
                 if let Ok(m) = master_resize.lock() {
                     let _ = m.resize(PtySize {
                         rows,
@@ -296,7 +322,7 @@ async fn handle_client(
                     });
                 }
                 if let Ok(mut vt) = vt_parser_resize.lock() {
-                    vt.set_size(rows, cols);
+                    *vt = Vt100Parser::new(rows, cols, 1000);
                 }
             }
             Ok(Packet::Ping { timestamp }) => {

@@ -48,7 +48,9 @@ impl LocalPredictor {
     }
 
     pub fn set_size(&mut self, rows: u16, cols: u16) {
-        self.vt_parser.set_size(rows, cols);
+        let rows = rows.max(1);
+        let cols = cols.max(1);
+        self.vt_parser = Vt100Parser::new(rows, cols, 1000);
     }
 
     pub fn active_predictions(&self) -> usize {
@@ -132,14 +134,27 @@ impl LocalPredictor {
         self.predictions.clear();
     }
 
+    /// Reset predictor state on paste or bulk input
+    pub fn reset(&mut self) {
+        self.reset_predictions();
+        self.become_tentative();
+    }
+
     /// Inspect incoming server frame bytes, process into 2D virtual terminal, and cull predictions
     pub fn inspect_server_frame(&mut self, raw_data: &[u8], stdout: &mut io::Stdout) {
         if !self.enabled {
             return;
         }
 
-        // 1. Process raw frame into 2D VT100 virtual terminal screen state
-        self.vt_parser.process(raw_data);
+        // 1. Process raw frame into 2D VT100 virtual terminal screen state safely
+        let parser = &mut self.vt_parser;
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parser.process(raw_data);
+        }));
+        if res.is_err() {
+            let (r, c) = self.vt_parser.screen().size();
+            self.vt_parser = Vt100Parser::new(r, c, 1000);
+        }
 
         // 2. Alternate screen buffer check
         let enables_alt = contains_subslice(raw_data, b"\x1b[?1049h")

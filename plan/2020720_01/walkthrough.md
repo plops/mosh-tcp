@@ -46,9 +46,9 @@ Grounding our architectural decisions against the official Mobile Shell C++ repo
 - **Issue**: Browsh dumps heavy ANSI color streams (20 KB - 100 KB). Server PTY buffer truncation cut off ANSI escape sequence headers, corrupting the client parser state and breaking Browsh navigation (`Ctrl+L` + `youtube.com`).
 - **Solution**: Re-integrated server-side `vt100::Parser` in [`src/server.rs`](file:///workspace/src/mosh-tcp/src/server.rs). On buffer overflow (`guard.len() > MAX_PTY_BUFFER_CAP`), the server clears the raw buffer and renders an **Atomic VT100 Screen Frame** (`\x1b[H\x1b[2J` + `screen.contents_formatted()` + `\x1b[{row};{col}H`), ensuring zero ANSI syntax corruption.
 
-### 3. Interactive Mouse Support (Browsh, Tmux, Vim)
-- **Issue**: Mouse clicks, hover movements, dragging, and scrolling had no effect in Browsh or Tmux over `mosh-tcp`.
-- **Solution**: Enabled `crossterm::event::EnableMouseCapture` in [`src/client.rs`](file:///workspace/src/mosh-tcp/src/client.rs). Added `mouse_event_to_bytes` to convert Crossterm `Event::Mouse` (press, release, hover move, drag, scroll) into **SGR 1006 Extended Mouse Tracking Sequences** (`\x1b[<{button};{col};{row}M` / `m`). Mouse hover (e.g. blue outline on Firefox/Browsh elements) and clicks work seamlessly.
+### 3. Interactive Mouse Support & Alacritty Copy-Paste / Text Insertion
+- **Issue**: Middle-click paste and mouse text selection were broken in terminal emulators like Alacritty because mouse capture was unconditionally forced on client startup, causing Alacritty to intercept all mouse clicks as escape codes. Additionally, Crossterm bracketed paste events (`Event::Paste`) were unhandled and discarded.
+- **Solution**: Removed global unconditional `EnableMouseCapture` at client startup, allowing mouse capture to be dynamically controlled by remote TUI escape sequences (as original Mosh does in [`terminaldisplay.cc`](file:///workspace/src/mosh/src/terminal/terminaldisplay.cc#L283-L298)). Enabled `crossterm::event::EnableBracketedPaste` and added support for `Event::Paste(text)` in [`src/client.rs`](file:///workspace/src/mosh-tcp/src/client.rs). Pasted text resets predictions and sends raw UTF-8 bytes to the server PTY, restoring full middle-button paste and text selection in Alacritty.
 
 ### 4. ResponseFilter UTF-8 Slicing Panic & Alt Key Support
 - **Issue**: Slicing Rust `String` byte-by-byte caused fatal panics on multi-byte UTF-8 inputs (`ø` `[0xC3, 0xB8]`, German umlauts). Alt/Meta key combinations (`M-x` in Emacs) were unhandled.
