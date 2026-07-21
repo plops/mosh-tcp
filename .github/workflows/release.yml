@@ -29,52 +29,65 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install UPX
+      - name: Install UPX & xz
         run: |
           sudo apt-get update
-          sudo apt-get install -y upx
+          sudo apt-get install -y upx xz-utils
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Build standalone client release
+        run: cargo build --release --no-default-features --features client --bin mosh-tcp-client --target ${{ matrix.target }}
+
+      - name: Build standalone server release
+        run: cargo build --release --no-default-features --features server --bin mosh-tcp-server --target ${{ matrix.target }}
+
+      - name: Build unified release
+        run: cargo build --release --bin mosh-tcp --target ${{ matrix.target }}
 
       - name: Package assets
         shell: bash
         run: |
           set -euo pipefail
-          echo "Packaging mosh-tcp-${{ matrix.target }}..."
-          mkdir -p staging
-
-          # Copy binary
-          bin_path="target/${{ matrix.target }}/release/mosh-tcp"
-          if [ ! -f "$bin_path" ]; then
-            bin_path="target/release/mosh-tcp"
+          echo "Packaging mosh-tcp release assets for ${{ matrix.target }}..."
+          
+          target_dir="target/${{ matrix.target }}/release"
+          if [ ! -d "$target_dir" ]; then
+            target_dir="target/release"
           fi
 
-          if [ -f "$bin_path" ]; then
-            cp "$bin_path" staging/
-          else
-            echo "Error: mosh-tcp binary not found!"
-            exit 1
-          fi
+          # 1. UPX Compress all binaries
+          echo "Compressing binaries with UPX (--best --lzma)..."
+          upx --best --lzma "$target_dir/mosh-tcp-client" "$target_dir/mosh-tcp-server" "$target_dir/mosh-tcp"
 
-          # Compress binary with UPX for maximum size reduction
-          echo "Compressing mosh-tcp binary with UPX..."
-          upx --best --lzma staging/mosh-tcp
+          # 2. Standalone Client Executable (direct download for slow connections, ~258 KB)
+          cp "$target_dir/mosh-tcp-client" mosh-tcp-client-linux-amd64
+          chmod +x mosh-tcp-client-linux-amd64
 
-          # Copy README documentation if present (walkthrough.md excluded)
-          if [ -f README.md ]; then
-            cp README.md staging/
-          fi
+          # 3. Client Tar.xz Archive
+          mkdir -p client_staging
+          cp "$target_dir/mosh-tcp-client" client_staging/
+          if [ -f README.md ]; then cp README.md client_staging/; fi
+          tar -cf - -C client_staging . | xz -9e > mosh-tcp-client-linux-amd64.tar.xz
+          rm -rf client_staging
 
-          # Archive asset
-          tar_name="mosh-tcp-linux-amd64.tar.gz"
-          tar czf "$tar_name" -C staging .
-          rm -rf staging
-          echo "Created archive: $tar_name"
-          ls -lh "$tar_name"
+          # 4. Server Tar.gz Archive
+          mkdir -p server_staging
+          cp "$target_dir/mosh-tcp-server" server_staging/
+          if [ -f README.md ]; then cp README.md server_staging/; fi
+          tar czf mosh-tcp-server-linux-amd64.tar.gz -C server_staging .
+          rm -rf server_staging
+
+          # 5. Unified Package Tar.gz Archive
+          mkdir -p unified_staging
+          cp "$target_dir/mosh-tcp" unified_staging/
+          if [ -f README.md ]; then cp README.md unified_staging/; fi
+          tar czf mosh-tcp-linux-amd64.tar.gz -C unified_staging .
+          rm -rf unified_staging
+
+          echo "=== RELEASE ARTIFACTS GENERATED ==="
+          ls -lh mosh-tcp-client-linux-amd64 mosh-tcp-client-linux-amd64.tar.xz mosh-tcp-server-linux-amd64.tar.gz mosh-tcp-linux-amd64.tar.gz
 
       - name: Extract Tag Release Body
         shell: bash
@@ -95,6 +108,9 @@ jobs:
           tag_name: ${{ github.ref_name }}
           body_path: release_body.md
           files: |
+            mosh-tcp-client-linux-amd64
+            mosh-tcp-client-linux-amd64.tar.xz
+            mosh-tcp-server-linux-amd64.tar.gz
             mosh-tcp-linux-amd64.tar.gz
           fail_on_unmatched_files: true
         env:

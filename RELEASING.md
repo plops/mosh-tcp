@@ -10,11 +10,12 @@ This document describes the automated release workflow for `mosh-tcp`.
 
 ### Release Artifacts Published
 Each GitHub Release contains:
-- `mosh-tcp-linux-amd64.tar.gz` — Tarball containing:
-  - `mosh-tcp` — The release binary (`x86_64-unknown-linux-gnu`)
-  - `README.md` — Project documentation
-  - Binary compressed using **UPX** (`--best --lzma`) and compiled with max size reduction (`opt-level = "z"`, `lto`, `panic = "abort"`, `strip`)
+- `mosh-tcp-client-linux-amd64` — Direct standalone UPX-compressed client executable (~258 KB) for fast downloading on slow network connections without requiring extraction tools.
+- `mosh-tcp-client-linux-amd64.tar.xz` — `tar.xz` archive containing the UPX-compressed client binary and documentation.
+- `mosh-tcp-server-linux-amd64.tar.gz` — Tarball containing the server binary (`mosh-tcp-server`) and documentation.
+- `mosh-tcp-linux-amd64.tar.gz` — Tarball containing the unified client/server release binary (`mosh-tcp`) and documentation.
 - **Automated Collated Release Notes** — Published directly on the GitHub Release webpage.
+
 
 ---
 

@@ -18,7 +18,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 
-pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> anyhow::Result<()> {
+pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io::Result<()> {
     let socket = TcpStream::connect(server_addr).await?;
     println!("[mosh-tcp client] Connected to {}", server_addr);
 
