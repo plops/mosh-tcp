@@ -6,7 +6,7 @@ description: Use when creating a release, bumping the version, tagging a commit,
 # Release Process (`mosh-tcp`)
 
 ## Overview
-`mosh-tcp` uses GitHub Actions to automatically build Linux binaries (`mosh-tcp-linux-amd64.tar.gz`) and publish collated release notes on the GitHub webpage whenever a git tag matching `v*` is pushed.
+`mosh-tcp` uses GitHub Actions to automatically build Linux release assets (`mosh-tcp-client-linux-amd64` direct UPX executable and `mosh-tcp-linux-amd64.tar.gz` client+server archive) and publish collated release notes on GitHub whenever a git tag matching `v*` is pushed.
 
 ## Automated Release Workflow
 
