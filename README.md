@@ -1,6 +1,10 @@
 # mosh-tcp
 
+[![CI](https://github.com/plops/mosh-tcp/actions/workflows/ci.yml/badge.svg)](https://github.com/plops/mosh-tcp/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
 A latency-tolerant, bandwidth-throttled terminal proxy (Client & Server) designed for ultra-slow connections (such as free 6 kB/s mobile internet or severe tethering caps) and **double-CGNAT environments** over **SSH tunnels**.
+
 
 ---
 

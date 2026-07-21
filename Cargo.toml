@@ -3,6 +3,8 @@ name = "mosh-tcp"
 version = "0.4.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
+repository = "https://github.com/plops/mosh-tcp"
+
 
 [lib]
 name = "mosh_tcp"
