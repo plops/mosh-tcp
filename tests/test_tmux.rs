@@ -9,13 +9,21 @@ use tokio::process::Command;
 use tokio::time::sleep;
 use tokio_util::codec::Framed;
 
+fn get_free_address() -> SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    addr
+}
+
 #[tokio::test]
 async fn test_tmux_session() -> anyhow::Result<()> {
-    let bind_addr: SocketAddr = "127.0.0.1:4098".parse()?;
+    let bind_addr = get_free_address();
+    let bind_str = bind_addr.to_string();
 
-    // 1. Start mosh-tcp server on port 4098
+    // 1. Start mosh-tcp server
     let mut server_proc = Command::new("./target/debug/mosh-tcp")
-        .args(&["server", "--bind", "127.0.0.1:4098", "--fps", "50"])
+        .args(&["server", "--bind", &bind_str, "--fps", "50"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;

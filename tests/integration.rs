@@ -9,13 +9,58 @@ use tokio::process::Command;
 use tokio::time::sleep;
 use tokio_util::codec::Framed;
 
+pub fn get_free_address() -> SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    addr
+}
+
+#[tokio::test]
+async fn test_in_memory_duplex_framing() -> anyhow::Result<()> {
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+
+    let mut client_framed = Framed::new(client_io, PacketCodec::new());
+    let mut server_framed = Framed::new(server_io, PacketCodec::new());
+
+    // Client sends Packet::ClientResize
+    client_framed.send(Packet::ClientResize { rows: 30, cols: 100 }).await?;
+
+    // Server receives Packet::ClientResize
+    let received = server_framed.next().await.unwrap()?;
+    assert_eq!(received, Packet::ClientResize { rows: 30, cols: 100 });
+
+    // Server sends compressed Packet::ServerFrame
+    let payload = b"In-Memory Duplex Test Payload".to_vec();
+    let (compressed_data, is_compressed) = Packet::compress_data(&payload);
+    server_framed
+        .send(Packet::ServerFrame {
+            seq: 1,
+            data: compressed_data,
+            compressed: is_compressed,
+        })
+        .await?;
+
+    // Client receives Packet::ServerFrame and decompresses
+    let client_received = client_framed.next().await.unwrap()?;
+    if let Packet::ServerFrame { data, compressed, .. } = client_received {
+        let decompressed = Packet::decompress_data(&data, compressed)?;
+        assert_eq!(decompressed, payload);
+    } else {
+        panic!("Expected ServerFrame packet!");
+    }
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_server_editing_and_heavy_output() -> anyhow::Result<()> {
-    let bind_addr: SocketAddr = "127.0.0.1:4099".parse()?;
+    let bind_addr = get_free_address();
+    let bind_str = bind_addr.to_string();
 
     // Launch server binary in background with 1000 KB/s cap for fast throughput test
     let mut server_proc = Command::new("./target/debug/mosh-tcp")
-        .args(&["server", "--bind", "127.0.0.1:4099", "--fps", "50", "--max-kbps", "1000"])
+        .args(&["server", "--bind", &bind_str, "--fps", "50", "--max-kbps", "1000"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;

@@ -9,14 +9,21 @@ use tokio::process::Command;
 use tokio::time::sleep;
 use tokio_util::codec::Framed;
 
+fn get_free_address() -> SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    addr
+}
+
 #[tokio::test]
 async fn test_bandwidth_throttling_and_frame_skipping() -> anyhow::Result<()> {
-    // Use non-4000 port (4096)
-    let bind_addr: SocketAddr = "127.0.0.1:4096".parse()?;
+    let bind_addr = get_free_address();
+    let bind_str = bind_addr.to_string();
 
     // 1. Launch server with 6 KB/s max bandwidth limit and --stats enabled
     let mut server_proc = Command::new("./target/debug/mosh-tcp")
-        .args(&["server", "--bind", "127.0.0.1:4096", "--max-kbps", "6", "--stats"])
+        .args(&["server", "--bind", &bind_str, "--max-kbps", "6", "--stats"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -72,11 +79,12 @@ async fn test_bandwidth_throttling_and_frame_skipping() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_carbonyl_ansi_heavy_rate_limit() -> anyhow::Result<()> {
-    let bind_addr: SocketAddr = "127.0.0.1:4097".parse()?;
+    let bind_addr = get_free_address();
+    let bind_str = bind_addr.to_string();
 
     // 1. Launch server with 6 KB/s max bandwidth limit
     let mut server_proc = Command::new("./target/debug/mosh-tcp")
-        .args(&["server", "--bind", "127.0.0.1:4097", "--max-kbps", "6", "--stats"])
+        .args(&["server", "--bind", &bind_str, "--max-kbps", "6", "--stats"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
