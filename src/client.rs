@@ -1,5 +1,5 @@
 use crate::predictive::LocalPredictor;
-use crate::protocol::{Packet, PacketCodec};
+use crate::protocol::Packet;
 #[allow(unused_imports)]
 use crossterm::event::MouseEvent;
 use crossterm::event::{
@@ -8,18 +8,14 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
-use futures::sink::SinkExt;
-use futures::stream::StreamExt;
 use std::io::{self, Write};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use tokio::net::TcpStream;
-use tokio::sync::mpsc;
-use tokio_util::codec::Framed;
 
-pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io::Result<()> {
-    let socket = TcpStream::connect(server_addr).await?;
+pub fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io::Result<()> {
+    let mut socket = TcpStream::connect(server_addr)?;
     println!("[mosh-tcp client] Connected to {}", server_addr);
 
     struct RawModeGuard;
@@ -38,20 +34,19 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io:
     let _ = execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
     let _guard = RawModeGuard;
 
-    let framed = Framed::new(socket, PacketCodec::new());
-    let (mut writer, mut reader) = framed.split();
-
+    let mut write_socket = socket.try_clone()?;
     let predictor = Arc::new(Mutex::new(LocalPredictor::new(enable_predictive)));
 
     if let Ok((cols, rows)) = size() {
         if let Ok(mut pred) = predictor.lock() {
             pred.set_size(rows, cols);
         }
-        let _ = writer.send(Packet::ClientResize { rows, cols }).await;
+        let pkt = Packet::ClientResize { rows, cols };
+        let _ = write_packet(&mut write_socket, &pkt);
     }
 
     let running = Arc::new(AtomicBool::new(true));
-    let (input_tx, mut input_rx) = mpsc::channel::<Packet>(100);
+    let (input_tx, input_rx) = mpsc::channel::<Packet>();
 
     // Task 1: Stdin & Terminal Event loop
     let running_clone = Arc::clone(&running);
@@ -79,7 +74,7 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io:
                                 if let Ok(mut pred) = predictor_input.lock() {
                                     let _ = pred.handle_keystroke(&clean_data);
                                 }
-                                let _ = input_tx.blocking_send(Packet::ClientInput { data: clean_data });
+                                let _ = input_tx.send(Packet::ClientInput { data: clean_data });
                             }
                         }
                     }
@@ -88,7 +83,7 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io:
                             if let Ok(mut pred) = predictor_input.lock() {
                                 pred.reset();
                             }
-                            let _ = input_tx.blocking_send(Packet::ClientInput {
+                            let _ = input_tx.send(Packet::ClientInput {
                                 data: text.into_bytes(),
                             });
                         }
@@ -96,14 +91,14 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io:
                     Ok(Event::Mouse(mouse_event)) => {
                         let mouse_data = mouse_event_to_bytes(mouse_event);
                         if !mouse_data.is_empty() {
-                            let _ = input_tx.blocking_send(Packet::ClientInput { data: mouse_data });
+                            let _ = input_tx.send(Packet::ClientInput { data: mouse_data });
                         }
                     }
                     Ok(Event::Resize(cols, rows)) => {
                         if let Ok(mut pred) = predictor_input.lock() {
                             pred.set_size(rows, cols);
                         }
-                        let _ = input_tx.blocking_send(Packet::ClientResize { rows, cols });
+                        let _ = input_tx.send(Packet::ClientResize { rows, cols });
                     }
                     _ => {}
                 }
@@ -112,9 +107,15 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io:
     });
 
     // Task 2: Network Sender
-    let send_handle = tokio::spawn(async move {
-        while let Some(packet) = input_rx.recv().await {
-            if writer.send(packet).await.is_err() {
+    let running_sender = Arc::clone(&running);
+    let mut sender_socket = socket.try_clone()?;
+    std::thread::spawn(move || {
+        while running_sender.load(Ordering::Relaxed) {
+            if let Ok(packet) = input_rx.recv() {
+                if write_packet(&mut sender_socket, &packet).is_err() {
+                    break;
+                }
+            } else {
                 break;
             }
         }
@@ -124,37 +125,50 @@ pub async fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io:
     let mut stdout = io::stdout();
     let predictor_recv = Arc::clone(&predictor);
 
+    socket.set_read_timeout(Some(std::time::Duration::from_millis(500)))?;
+
     while running.load(Ordering::Relaxed) {
-        tokio::select! {
-            packet_opt = reader.next() => {
-                match packet_opt {
-                    Some(Ok(Packet::ServerFrame { data, compressed, .. })) => {
-                        if let Ok(raw) = Packet::decompress_data(&data, compressed) {
-                            if let Ok(mut pred) = predictor_recv.lock() {
-                                pred.inspect_server_frame(&raw, &mut stdout);
-                                let _ = pred.clear_predictions(&mut stdout);
-                            }
-                            let _ = stdout.write_all(&raw);
-                            let _ = stdout.flush();
-                        }
+        match read_packet(&mut socket) {
+            Ok(Packet::ServerFrame { data, compressed, .. }) => {
+                if let Ok(raw) = Packet::decompress_data(&data, compressed) {
+                    if let Ok(mut pred) = predictor_recv.lock() {
+                        pred.inspect_server_frame(&raw, &mut stdout);
+                        let _ = pred.clear_predictions(&mut stdout);
                     }
-                    Some(Ok(_)) => {}
-                    Some(Err(e)) => {
-                        eprintln!("\r\n[mosh-tcp client] Connection error: {}", e);
-                        break;
-                    }
-                    None => {
-                        eprintln!("\r\n[mosh-tcp client] Server closed connection.");
-                        break;
-                    }
+                    let _ = stdout.write_all(&raw);
+                    let _ = stdout.flush();
                 }
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+                continue;
+            }
+            Err(e) => {
+                eprintln!("\r\n[mosh-tcp client] Connection error: {}", e);
+                break;
             }
         }
     }
 
     running.store(false, Ordering::Relaxed);
-    send_handle.abort();
     Ok(())
+}
+
+fn write_packet(writer: &mut impl io::Write, packet: &Packet) -> io::Result<()> {
+    let serialized = packet.serialize();
+    let len = (serialized.len() as u32).to_be_bytes();
+    writer.write_all(&len)?;
+    writer.write_all(&serialized)?;
+    writer.flush()
+}
+
+fn read_packet(reader: &mut impl io::Read) -> io::Result<Packet> {
+    let mut len_bytes = [0u8; 4];
+    reader.read_exact(&mut len_bytes)?;
+    let len = u32::from_be_bytes(len_bytes) as usize;
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf)?;
+    Packet::deserialize(&buf)
 }
 
 struct ResponseFilter {
@@ -284,7 +298,7 @@ fn key_event_to_bytes(key: event::KeyEvent) -> Vec<u8> {
         KeyCode::F(3) => vec![27, 79, 82],
         KeyCode::F(4) => vec![27, 79, 83],
         KeyCode::F(5) => vec![27, 91, 49, 53, 126],
-        KeyCode::F(6) => vec![27, 91, 49, 55, 126],
+        KeyCode::F(6) => vec![27, 91, 49, 57, 126],
         KeyCode::F(7) => vec![27, 91, 49, 56, 126],
         KeyCode::F(8) => vec![27, 91, 49, 57, 126],
         KeyCode::F(9) => vec![27, 91, 50, 48, 126],

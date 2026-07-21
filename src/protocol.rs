@@ -1,9 +1,12 @@
+#[cfg(feature = "server")]
 use bytes::{Buf, BufMut, BytesMut};
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::io::{self, Read, Write};
+#[cfg(feature = "server")]
 use tokio_util::codec::{Decoder, Encoder};
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Packet {
@@ -164,14 +167,17 @@ impl Packet {
 }
 
 /// Length-prefixed framing codec: [4-byte big endian length][manual packet payload]
+#[cfg(feature = "server")]
 pub struct PacketCodec;
 
+#[cfg(feature = "server")]
 impl PacketCodec {
     pub fn new() -> Self {
         Self
     }
 }
 
+#[cfg(feature = "server")]
 impl Decoder for PacketCodec {
     type Item = Packet;
     type Error = io::Error;
@@ -197,6 +203,7 @@ impl Decoder for PacketCodec {
     }
 }
 
+#[cfg(feature = "server")]
 impl Encoder<Packet> for PacketCodec {
     type Error = io::Error;
 

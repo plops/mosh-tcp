@@ -2,8 +2,7 @@ use mosh_tcp::client;
 use std::env;
 use std::net::SocketAddr;
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
     let mut connect: SocketAddr = "127.0.0.1:4000".parse().unwrap();
@@ -32,7 +31,7 @@ async fn main() -> std::io::Result<()> {
         i += 1;
     }
 
-    client::run_client(connect, predict).await?;
+    client::run_client(connect, predict)?;
     Ok(())
 }
 

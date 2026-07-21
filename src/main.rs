@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 i += 1;
             }
-            mosh_tcp::client::run_client(connect, predict).await?;
+            mosh_tcp::client::run_client(connect, predict)?;
         }
         _ => print_usage(),
     }

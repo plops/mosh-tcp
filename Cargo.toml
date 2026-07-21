@@ -24,21 +24,26 @@ required-features = ["server"]
 [features]
 default = ["client", "server"]
 client = []
-server = ["dep:portable-pty"]
+server = ["dep:portable-pty", "dep:tokio", "dep:tokio-util", "dep:bytes", "dep:futures"]
 
 [dependencies]
-tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "io-util", "sync"] }
-portable-pty = { version = "0.9", optional = true }
 crossterm = "0.29"
 flate2 = "1.1"
-bytes = "1.12"
-tokio-util = { version = "0.7", features = ["codec"] }
-futures = "0.3"
 anyhow = "1.0"
 vt100 = "0.15.2"
 
+# Server-only dependencies
+tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "io-util", "sync"], optional = true }
+tokio-util = { version = "0.7", features = ["codec"], optional = true }
+bytes = { version = "1.12", optional = true }
+portable-pty = { version = "0.9", optional = true }
+futures = { version = "0.3", optional = true }
+
 [dev-dependencies]
-tokio = { version = "1.53", features = ["process", "io-util"] }
+tokio = { version = "1.53", features = ["process", "io-util", "net", "rt-multi-thread", "macros"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1.12"
+futures = "0.3"
 
 [profile.release]
 opt-level = "z"
