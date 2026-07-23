@@ -24,6 +24,12 @@ pub enum Packet {
         data: Vec<u8>,
         compressed: bool,
     },
+    /// Client authentication handshake sent upon TCP connection establishment
+    ClientHandshake {
+        session_key: String,
+        rows: u16,
+        cols: u16,
+    },
 }
 
 impl Packet {
@@ -89,6 +95,18 @@ impl Packet {
                 buf.push(if *compressed { 1u8 } else { 0u8 });
                 buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
                 buf.extend_from_slice(data);
+            }
+            Packet::ClientHandshake {
+                session_key,
+                rows,
+                cols,
+            } => {
+                buf.push(6u8);
+                let key_bytes = session_key.as_bytes();
+                buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
+                buf.extend_from_slice(key_bytes);
+                buf.extend_from_slice(&rows.to_be_bytes());
+                buf.extend_from_slice(&cols.to_be_bytes());
             }
         }
         buf
@@ -156,6 +174,25 @@ impl Packet {
                     seq,
                     data: src[..len].to_vec(),
                     compressed,
+                })
+            }
+            6 => {
+                if src.len() < 2 {
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "ClientHandshake key len missing"));
+                }
+                let key_len = u16::from_be_bytes(src[..2].try_into().unwrap()) as usize;
+                src = &src[2..];
+                if src.len() < key_len + 4 {
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "ClientHandshake payload truncated"));
+                }
+                let session_key = String::from_utf8_lossy(&src[..key_len]).to_string();
+                src = &src[key_len..];
+                let rows = u16::from_be_bytes(src[..2].try_into().unwrap());
+                let cols = u16::from_be_bytes(src[2..4].try_into().unwrap());
+                Ok(Packet::ClientHandshake {
+                    session_key,
+                    rows,
+                    cols,
                 })
             }
             other => Err(io::Error::new(

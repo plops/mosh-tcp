@@ -38,6 +38,16 @@ impl ServerSessionState {
 }
 
 
+fn generate_session_key() -> String {
+    use std::time::SystemTime;
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id();
+    format!("{:016x}{:08x}{:08x}", nanos, pid, (nanos & 0xffffffff) as u32)
+}
+
 pub async fn run_server(
     bind_addr: SocketAddr,
     fps: u64,
@@ -45,24 +55,42 @@ pub async fn run_server(
     enable_stats: bool,
     shell_cmd: Option<String>,
 ) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(bind_addr).await?;
-    println!("[mosh-tcp server] Listening on TCP {}", bind_addr);
-    println!(
-        "[mosh-tcp server] Frame rate: {} FPS | Max Bandwidth: {} KB/s",
-        fps, max_kbps
+    let mut current_addr = bind_addr;
+    let listener = match TcpListener::bind(current_addr).await {
+        Ok(l) => l,
+        Err(_) => {
+            current_addr.set_port(0);
+            TcpListener::bind(current_addr).await?
+        }
+    };
+
+    let bound_addr = listener.local_addr()?;
+    let session_key = generate_session_key();
+    let pid = std::process::id();
+
+    println!("MOSH-TCP CONNECT {} {} {}", bound_addr.port(), session_key, pid);
+    let _ = std::io::stdout().flush();
+
+    eprintln!("[mosh-tcp server] Listening on TCP {}", bound_addr);
+    eprintln!(
+        "[mosh-tcp server] Frame rate: {} FPS | Max Bandwidth: {} KB/s | Session Key: {}",
+        fps, max_kbps, session_key
     );
+
+    let session_key_arc = Arc::new(session_key);
 
     loop {
         let (socket, client_addr) = listener.accept().await?;
-        println!("[mosh-tcp server] Accepted connection from {}", client_addr);
+        eprintln!("[mosh-tcp server] Accepted connection from {}", client_addr);
         let frame_ms = 1000 / fps;
         let shell = shell_cmd.clone();
+        let expected_key = Arc::clone(&session_key_arc);
 
         tokio::spawn(async move {
-            if let Err(e) = handle_client(socket, frame_ms, max_kbps, enable_stats, shell).await {
+            if let Err(e) = handle_client(socket, frame_ms, max_kbps, enable_stats, shell, expected_key).await {
                 eprintln!("[mosh-tcp server] Client session error: {}", e);
             }
-            println!("[mosh-tcp server] Client disconnected: {}", client_addr);
+            eprintln!("[mosh-tcp server] Client disconnected: {}", client_addr);
         });
     }
 }
@@ -85,6 +113,7 @@ async fn handle_client(
     max_kbps: u64,
     enable_stats: bool,
     shell_cmd: Option<String>,
+    expected_key: Arc<String>,
 ) -> anyhow::Result<()> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
@@ -309,6 +338,25 @@ async fn handle_client(
 
     while let Some(packet_result) = reader.next().await {
         match packet_result {
+            Ok(Packet::ClientHandshake { session_key, rows, cols }) => {
+                if !session_key.is_empty() && session_key != *expected_key {
+                    eprintln!("[mosh-tcp server] Session key mismatch! Dropping client.");
+                    anyhow::bail!("Session authentication key mismatch");
+                }
+                let rows = rows.max(1);
+                let cols = cols.max(1);
+                if let Ok(m) = master_resize.lock() {
+                    let _ = m.resize(PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    });
+                }
+                if let Ok(mut state) = state_resize.lock() {
+                    state.vt_parser = Vt100Parser::new(rows, cols, 1000);
+                }
+            }
             Ok(Packet::ClientInput { data }) => {
                 if let Ok(mut w) = pty_writer_input.lock() {
                     let _ = w.write_all(&data);

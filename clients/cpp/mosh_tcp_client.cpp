@@ -89,7 +89,13 @@ struct ServerFrame {
     std::vector<uint8_t> data;
 };
 
-using Packet = std::variant<ClientInput, ClientResize, Ping, Pong, ServerFrame>;
+struct ClientHandshake {
+    std::string session_key;
+    uint16_t rows;
+    uint16_t cols;
+};
+
+using Packet = std::variant<ClientInput, ClientResize, Ping, Pong, ServerFrame, ClientHandshake>;
 
 class TerminalGuard {
 private:
@@ -196,6 +202,16 @@ static std::vector<uint8_t> serialize_packet(const Packet& pkt) {
             buf.push_back((len >> 8) & 0xFF);
             buf.push_back(len & 0xFF);
             buf.insert(buf.end(), arg.data.begin(), arg.data.end());
+        } else if constexpr (std::is_same_v<T, ClientHandshake>) {
+            buf.push_back(6);
+            uint16_t klen = static_cast<uint16_t>(arg.session_key.size());
+            buf.push_back((klen >> 8) & 0xFF);
+            buf.push_back(klen & 0xFF);
+            buf.insert(buf.end(), arg.session_key.begin(), arg.session_key.end());
+            buf.push_back((arg.rows >> 8) & 0xFF);
+            buf.push_back(arg.rows & 0xFF);
+            buf.push_back((arg.cols >> 8) & 0xFF);
+            buf.push_back(arg.cols & 0xFF);
         }
     }, pkt);
     return buf;
@@ -363,7 +379,8 @@ int main(int argc, char **argv) {
     std::string ssh_cmd = "ssh";
     std::optional<std::string> ssh_port_str;
     std::string server_cmd = "mosh-tcp-server";
-    int remote_port = 4000;
+    int remote_port = 0;
+    std::string session_key = "";
 
     for (int i = 1; i < argc; i++) {
         std::string_view arg = argv[i];
@@ -399,20 +416,75 @@ int main(int argc, char **argv) {
             connect_ip = target;
         }
     } else if (target_host) {
+        /* Step 1: Launch mosh-tcp-server on remote host and capture stdout */
+        int pipefds[2];
+        if (pipe(pipefds) < 0) {
+            perror("pipe failed");
+            return 1;
+        }
+
+        char remote_cmd_buf[256];
+        if (remote_port == 0) {
+            snprintf(remote_cmd_buf, sizeof(remote_cmd_buf), "%s --bind 127.0.0.1:0", server_cmd.c_str());
+        } else {
+            snprintf(remote_cmd_buf, sizeof(remote_cmd_buf), "%s --bind 127.0.0.1:%d", server_cmd.c_str(), remote_port);
+        }
+
+        std::vector<char*> launch_argv;
+        launch_argv.push_back(const_cast<char*>(ssh_cmd.c_str()));
+        if (ssh_port_str) {
+            launch_argv.push_back(const_cast<char*>("-p"));
+            launch_argv.push_back(const_cast<char*>(ssh_port_str->c_str()));
+        }
+        launch_argv.push_back(const_cast<char*>(target_host->c_str()));
+        launch_argv.push_back(remote_cmd_buf);
+        launch_argv.push_back(nullptr);
+
+        std::cerr << "[mosh-tcp client-cpp] Launching server on " << *target_host << " via SSH...\n";
+        pid_t launch_pid = fork();
+        if (launch_pid == 0) {
+            close(pipefds[0]);
+            dup2(pipefds[1], STDOUT_FILENO);
+            close(pipefds[1]);
+            execvp(ssh_cmd.c_str(), launch_argv.data());
+            perror("execvp ssh launcher failed");
+            _exit(1);
+        }
+        close(pipefds[1]);
+
+        int bound_port = remote_port;
+        FILE *fp = fdopen(pipefds[0], "r");
+        if (fp) {
+            char line[256];
+            while (fgets(line, sizeof(line), fp)) {
+                std::string_view l(line);
+                if (l.starts_with("MOSH-TCP CONNECT ")) {
+                    int p = 0;
+                    char key_buf[128] = "";
+                    if (sscanf(line, "MOSH-TCP CONNECT %d %127s", &p, key_buf) >= 2) {
+                        bound_port = p;
+                        session_key = key_buf;
+                        break;
+                    }
+                }
+            }
+            fclose(fp);
+        }
+        if (bound_port == 0) bound_port = 4000;
+
+        /* Step 2: Establish local SSH tunnel */
         int local_port = find_free_port();
         connect_ip = "127.0.0.1";
         connect_port = local_port;
 
         char fwd_buf[128];
-        snprintf(fwd_buf, sizeof(fwd_buf), "%d:127.0.0.1:%d", local_port, remote_port);
-
-        char remote_cmd_buf[256];
-        snprintf(remote_cmd_buf, sizeof(remote_cmd_buf), "%s --bind 127.0.0.1:%d", server_cmd.c_str(), remote_port);
+        snprintf(fwd_buf, sizeof(fwd_buf), "%d:127.0.0.1:%d", local_port, bound_port);
 
         std::vector<char*> ssh_argv;
         ssh_argv.push_back(const_cast<char*>(ssh_cmd.c_str()));
         ssh_argv.push_back(const_cast<char*>("-o"));
         ssh_argv.push_back(const_cast<char*>("ExitOnForwardFailure=yes"));
+        ssh_argv.push_back(const_cast<char*>("-N"));
         ssh_argv.push_back(const_cast<char*>("-L"));
         ssh_argv.push_back(fwd_buf);
         if (ssh_port_str) {
@@ -420,14 +492,13 @@ int main(int argc, char **argv) {
             ssh_argv.push_back(const_cast<char*>(ssh_port_str->c_str()));
         }
         ssh_argv.push_back(const_cast<char*>(target_host->c_str()));
-        ssh_argv.push_back(remote_cmd_buf);
         ssh_argv.push_back(nullptr);
 
-        std::cerr << "[mosh-tcp client-cpp] Connecting to " << *target_host << " via SSH tunnel (local port " << local_port << ")...\n";
+        std::cerr << "[mosh-tcp client-cpp] Established tunnel (local port " << local_port << " -> remote port " << bound_port << ")...\n";
         pid_t pid = fork();
         if (pid == 0) {
             execvp(ssh_cmd.c_str(), ssh_argv.data());
-            perror("execvp ssh failed");
+            perror("execvp ssh tunnel failed");
             _exit(1);
         } else if (pid > 0) {
             ssh_tunnel = mosh::SshTunnel(pid);
@@ -473,13 +544,14 @@ int main(int argc, char **argv) {
     mosh::TerminalGuard term_guard;
     mosh::setup_signals();
 
-    /* Initial resize */
+    /* Send initial handshake with session key and window size */
     struct winsize ws{};
+    uint16_t rows = 24, cols = 80;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
-        mosh::send_framed_packet(sock, mosh::ClientResize{ .rows = ws.ws_row, .cols = ws.ws_col });
-    } else {
-        mosh::send_framed_packet(sock, mosh::ClientResize{ .rows = 24, .cols = 80 });
+        rows = ws.ws_row;
+        cols = ws.ws_col;
     }
+    mosh::send_framed_packet(sock, mosh::ClientHandshake{ .session_key = session_key, .rows = rows, .cols = cols });
 
     std::vector<uint8_t> net_buf(65536);
     std::vector<uint8_t> in_buf(4096);

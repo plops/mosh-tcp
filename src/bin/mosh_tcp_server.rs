@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    let mut bind: SocketAddr = "0.0.0.0:4000".parse().unwrap();
+    let mut bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let mut fps = 50u64;
     let mut max_kbps = 6u64;
     let mut stats = false;

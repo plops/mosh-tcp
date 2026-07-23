@@ -11,7 +11,7 @@ fn main() -> std::io::Result<()> {
     let mut ssh_cmd = "ssh".to_string();
     let mut ssh_port: Option<u16> = None;
     let mut remote_server_cmd = "mosh-tcp-server".to_string();
-    let mut remote_port: u16 = 4000;
+    let mut remote_port: u16 = 0;
 
     let mut i = 1;
     while i < args.len() {
@@ -71,8 +71,8 @@ fn main() -> std::io::Result<()> {
     if let Some(addr) = connect_addr {
         client::run_client(addr, predict)?;
     } else if let Some(target) = target_host {
-        let (_tunnel, stream) = SshTunnel::spawn(&ssh_cmd, &target, ssh_port, &remote_server_cmd, remote_port)?;
-        client::run_client_stream(stream, predict)?;
+        let (_tunnel, stream, session_key) = SshTunnel::spawn(&ssh_cmd, &target, ssh_port, &remote_server_cmd, remote_port)?;
+        client::run_client_stream_handshake(stream, predict, &session_key)?;
     } else {
         let default_addr: SocketAddr = "127.0.0.1:4000".parse().unwrap();
         client::run_client(default_addr, predict)?;

@@ -18,9 +18,14 @@ use std::process::{Child, Command};
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
+use std::io::BufRead;
+
 pub struct SshTunnel {
-    child: Child,
+    launcher_child: Option<Child>,
+    tunnel_child: Child,
     local_port: u16,
+    remote_port: u16,
+    session_key: String,
 }
 
 impl SshTunnel {
@@ -30,32 +35,80 @@ impl SshTunnel {
         ssh_port: Option<u16>,
         remote_server_cmd: &str,
         remote_port: u16,
-    ) -> io::Result<(Self, TcpStream)> {
+    ) -> io::Result<(Self, TcpStream, String)> {
+        // Step 1: Launch mosh-tcp-server on remote host via SSH stdout capture
+        let mut launch_cmd = Command::new(ssh_cmd);
+        if let Some(port) = ssh_port {
+            launch_cmd.arg("-p").arg(port.to_string());
+        }
+        launch_cmd.arg(target);
+        
+        let server_arg = if remote_port == 0 {
+            format!("{} --bind 127.0.0.1:0", remote_server_cmd)
+        } else {
+            format!("{} --bind 127.0.0.1:{}", remote_server_cmd, remote_port)
+        };
+        launch_cmd.arg(&server_arg);
+        launch_cmd.stdout(std::process::Stdio::piped());
+        launch_cmd.stderr(std::process::Stdio::inherit());
+
+        println!("[mosh-tcp client] Launching server on {} via SSH...", target);
+        let mut launcher_child = launch_cmd.spawn()?;
+
+        let mut bound_port = remote_port;
+        let mut session_key = String::new();
+
+        if let Some(stdout) = launcher_child.stdout.take() {
+            let reader = std::io::BufReader::new(stdout);
+            for line_res in reader.lines() {
+                if let Ok(line) = line_res {
+                    if line.starts_with("MOSH-TCP CONNECT ") {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 3 {
+                            if let Ok(p) = parts[2].parse::<u16>() {
+                                bound_port = p;
+                            }
+                            session_key = parts[3].to_string();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if bound_port == 0 {
+            bound_port = 4000;
+        }
+
+        // Step 2: Create local port forwarding SSH tunnel to bound_port
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let local_port = listener.local_addr()?.port();
         drop(listener);
 
-        let mut cmd = Command::new(ssh_cmd);
-        cmd.arg("-o").arg("ExitOnForwardFailure=yes");
-        cmd.arg("-L").arg(format!("{}:127.0.0.1:{}", local_port, remote_port));
+        let mut tunnel_cmd = Command::new(ssh_cmd);
+        tunnel_cmd.arg("-o").arg("ExitOnForwardFailure=yes");
+        tunnel_cmd.arg("-N");
+        tunnel_cmd.arg("-L").arg(format!("{}:127.0.0.1:{}", local_port, bound_port));
         if let Some(port) = ssh_port {
-            cmd.arg("-p").arg(port.to_string());
+            tunnel_cmd.arg("-p").arg(port.to_string());
         }
-        cmd.arg(target);
-        cmd.arg(format!("{} --bind 127.0.0.1:{}", remote_server_cmd, remote_port));
+        tunnel_cmd.arg(target);
 
-        println!("[mosh-tcp client] Connecting to {} via SSH tunnel (local port {})...", target, local_port);
-        let mut child = cmd.spawn()?;
+        println!(
+            "[mosh-tcp client] Established tunnel (local port {} -> remote port {})...",
+            local_port, bound_port
+        );
+        let mut tunnel_child = tunnel_cmd.spawn()?;
 
         let local_addr = format!("127.0.0.1:{}", local_port);
         let start = Instant::now();
         let timeout = Duration::from_secs(15);
 
         let stream = loop {
-            if let Ok(Some(status)) = child.try_wait() {
+            if let Ok(Some(status)) = tunnel_child.try_wait() {
                 return Err(io::Error::new(
                     io::ErrorKind::ConnectionRefused,
-                    format!("SSH child process exited unexpectedly with status: {}", status),
+                    format!("SSH tunnel process exited unexpectedly with status: {}", status),
                 ));
             }
 
@@ -64,7 +117,7 @@ impl SshTunnel {
             }
 
             if start.elapsed() > timeout {
-                let _ = child.kill();
+                let _ = tunnel_child.kill();
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "Timed out waiting for SSH tunnel TCP connection",
@@ -74,28 +127,58 @@ impl SshTunnel {
             std::thread::sleep(Duration::from_millis(100));
         };
 
-        Ok((SshTunnel { child, local_port }, stream))
+        Ok((
+            SshTunnel {
+                launcher_child: Some(launcher_child),
+                tunnel_child,
+                local_port,
+                remote_port: bound_port,
+                session_key: session_key.clone(),
+            },
+            stream,
+            session_key,
+        ))
     }
 
     pub fn local_port(&self) -> u16 {
         self.local_port
     }
+
+    pub fn remote_port(&self) -> u16 {
+        self.remote_port
+    }
+
+    pub fn session_key(&self) -> &str {
+        &self.session_key
+    }
 }
 
 impl Drop for SshTunnel {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.tunnel_child.kill();
+        let _ = self.tunnel_child.wait();
+        if let Some(mut child) = self.launcher_child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
 pub fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io::Result<()> {
     let socket = TcpStream::connect(server_addr)?;
     println!("[mosh-tcp client] Connected to {}", server_addr);
-    run_client_stream(socket, enable_predictive)
+    run_client_stream_handshake(socket, enable_predictive, "")
 }
 
-pub fn run_client_stream(mut socket: TcpStream, enable_predictive: bool) -> io::Result<()> {
+pub fn run_client_stream(socket: TcpStream, enable_predictive: bool) -> io::Result<()> {
+    run_client_stream_handshake(socket, enable_predictive, "")
+}
+
+pub fn run_client_stream_handshake(
+    mut socket: TcpStream,
+    enable_predictive: bool,
+    session_key: &str,
+) -> io::Result<()> {
     struct RawModeGuard;
     impl Drop for RawModeGuard {
         fn drop(&mut self) {
@@ -115,13 +198,17 @@ pub fn run_client_stream(mut socket: TcpStream, enable_predictive: bool) -> io::
     let mut write_socket = socket.try_clone()?;
     let predictor = Arc::new(Mutex::new(LocalPredictor::new(enable_predictive)));
 
-    if let Ok((cols, rows)) = size() {
-        if let Ok(mut pred) = predictor.lock() {
-            pred.set_size(rows, cols);
-        }
-        let pkt = Packet::ClientResize { rows, cols };
-        let _ = write_packet(&mut write_socket, &pkt);
+    let (cols, rows) = size().unwrap_or((80, 24));
+    if let Ok(mut pred) = predictor.lock() {
+        pred.set_size(rows, cols);
     }
+
+    let handshake_pkt = Packet::ClientHandshake {
+        session_key: session_key.to_string(),
+        rows,
+        cols,
+    };
+    let _ = write_packet(&mut write_socket, &handshake_pkt);
 
     let running = Arc::new(AtomicBool::new(true));
     let (input_tx, input_rx) = mpsc::channel::<Packet>();

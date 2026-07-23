@@ -109,6 +109,26 @@ static int send_resize(int sock, uint16_t rows, uint16_t cols) {
     return send_packet(sock, payload, 5);
 }
 
+static int send_handshake(int sock, const char *key, uint16_t rows, uint16_t cols) {
+    uint16_t key_len = key ? (uint16_t)strlen(key) : 0;
+    uint32_t payload_len = 1 + 2 + key_len + 2 + 2;
+    unsigned char *payload = malloc(payload_len);
+    if (!payload) return -1;
+    payload[0] = 6; /* Tag 6: ClientHandshake */
+    uint16_t be_key_len = htons(key_len);
+    memcpy(&payload[1], &be_key_len, 2);
+    if (key_len > 0) {
+        memcpy(&payload[3], key, key_len);
+    }
+    uint16_t be_rows = htons(rows);
+    uint16_t be_cols = htons(cols);
+    memcpy(&payload[3 + key_len], &be_rows, 2);
+    memcpy(&payload[5 + key_len], &be_cols, 2);
+    int res = send_packet(sock, payload, payload_len);
+    free(payload);
+    return res;
+}
+
 static int send_input(int sock, const unsigned char *data, uint32_t len) {
     unsigned char *payload = malloc(1 + 4 + len);
     if (!payload) return -1;
@@ -235,7 +255,8 @@ int main(int argc, char **argv) {
     const char *ssh_cmd = "ssh";
     const char *ssh_port_str = NULL;
     const char *server_cmd = "mosh-tcp-server";
-    int remote_port = 4000;
+    int remote_port = 0;
+    char session_key[128] = "";
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--connect") == 0 || strcmp(argv[i], "-c") == 0) {
@@ -270,21 +291,76 @@ int main(int argc, char **argv) {
             connect_ip = target;
         }
     } else if (target_host) {
+        /* Step 1: Launch mosh-tcp-server and capture stdout */
+        int pipefds[2];
+        if (pipe(pipefds) < 0) {
+            perror("pipe failed");
+            return 1;
+        }
+
+        char remote_cmd_buf[256];
+        if (remote_port == 0) {
+            snprintf(remote_cmd_buf, sizeof(remote_cmd_buf), "%s --bind 127.0.0.1:0", server_cmd);
+        } else {
+            snprintf(remote_cmd_buf, sizeof(remote_cmd_buf), "%s --bind 127.0.0.1:%d", server_cmd, remote_port);
+        }
+
+        char *launch_argv[32];
+        int l_idx = 0;
+        launch_argv[l_idx++] = (char *)ssh_cmd;
+        if (ssh_port_str) {
+            launch_argv[l_idx++] = "-p";
+            launch_argv[l_idx++] = (char *)ssh_port_str;
+        }
+        launch_argv[l_idx++] = (char *)target_host;
+        launch_argv[l_idx++] = remote_cmd_buf;
+        launch_argv[l_idx] = NULL;
+
+        fprintf(stderr, "[mosh-tcp client-c] Launching server on %s via SSH...\n", target_host);
+        pid_t launch_pid = fork();
+        if (launch_pid == 0) {
+            close(pipefds[0]);
+            dup2(pipefds[1], STDOUT_FILENO);
+            close(pipefds[1]);
+            execvp(ssh_cmd, launch_argv);
+            perror("execvp ssh launcher failed");
+            _exit(1);
+        }
+        close(pipefds[1]);
+
+        int bound_port = remote_port;
+        FILE *fp = fdopen(pipefds[0], "r");
+        if (fp) {
+            char line[256];
+            while (fgets(line, sizeof(line), fp)) {
+                if (strncmp(line, "MOSH-TCP CONNECT ", 17) == 0) {
+                    int p = 0;
+                    char key_buf[128] = "";
+                    if (sscanf(line, "MOSH-TCP CONNECT %d %127s", &p, key_buf) >= 2) {
+                        bound_port = p;
+                        strncpy(session_key, key_buf, sizeof(session_key) - 1);
+                        break;
+                    }
+                }
+            }
+            fclose(fp);
+        }
+        if (bound_port == 0) bound_port = 4000;
+
+        /* Step 2: Establish local SSH tunnel */
         int local_port = find_free_port();
         connect_ip = "127.0.0.1";
         connect_port = local_port;
 
         char fwd_buf[128];
-        snprintf(fwd_buf, sizeof(fwd_buf), "%d:127.0.0.1:%d", local_port, remote_port);
-
-        char remote_cmd_buf[256];
-        snprintf(remote_cmd_buf, sizeof(remote_cmd_buf), "%s --bind 127.0.0.1:%d", server_cmd, remote_port);
+        snprintf(fwd_buf, sizeof(fwd_buf), "%d:127.0.0.1:%d", local_port, bound_port);
 
         char *ssh_argv[32];
         int idx = 0;
         ssh_argv[idx++] = (char *)ssh_cmd;
         ssh_argv[idx++] = "-o";
         ssh_argv[idx++] = "ExitOnForwardFailure=yes";
+        ssh_argv[idx++] = "-N";
         ssh_argv[idx++] = "-L";
         ssh_argv[idx++] = fwd_buf;
         if (ssh_port_str) {
@@ -292,14 +368,13 @@ int main(int argc, char **argv) {
             ssh_argv[idx++] = (char *)ssh_port_str;
         }
         ssh_argv[idx++] = (char *)target_host;
-        ssh_argv[idx++] = remote_cmd_buf;
         ssh_argv[idx] = NULL;
 
-        fprintf(stderr, "[mosh-tcp client-c] Connecting to %s via SSH tunnel (local port %d)...\n", target_host, local_port);
+        fprintf(stderr, "[mosh-tcp client-c] Established tunnel (local port %d -> remote port %d)...\n", local_port, bound_port);
         pid_t pid = fork();
         if (pid == 0) {
             execvp(ssh_cmd, ssh_argv);
-            perror("execvp ssh failed");
+            perror("execvp ssh tunnel failed");
             _exit(1);
         } else if (pid > 0) {
             g_ssh_pid = pid;
@@ -347,13 +422,14 @@ int main(int argc, char **argv) {
 
     setup_signals_and_terminal();
 
-    /* Send initial terminal window size */
+    /* Send initial handshake with session key and window size */
     struct winsize ws;
+    uint16_t rows = 24, cols = 80;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
-        send_resize(sock, ws.ws_row, ws.ws_col);
-    } else {
-        send_resize(sock, 24, 80);
+        rows = ws.ws_row;
+        cols = ws.ws_col;
     }
+    send_handshake(sock, session_key, rows, cols);
 
     unsigned char *net_buf = malloc(BUFFER_SIZE);
     unsigned char *in_buf = malloc(4096);
