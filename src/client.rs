@@ -14,10 +14,88 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-pub fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io::Result<()> {
-    let mut socket = TcpStream::connect(server_addr)?;
-    println!("[mosh-tcp client] Connected to {}", server_addr);
+use std::process::{Child, Command};
+use std::net::TcpListener;
+use std::time::{Duration, Instant};
 
+pub struct SshTunnel {
+    child: Child,
+    local_port: u16,
+}
+
+impl SshTunnel {
+    pub fn spawn(
+        ssh_cmd: &str,
+        target: &str,
+        ssh_port: Option<u16>,
+        remote_server_cmd: &str,
+        remote_port: u16,
+    ) -> io::Result<(Self, TcpStream)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let local_port = listener.local_addr()?.port();
+        drop(listener);
+
+        let mut cmd = Command::new(ssh_cmd);
+        cmd.arg("-o").arg("ExitOnForwardFailure=yes");
+        cmd.arg("-L").arg(format!("{}:127.0.0.1:{}", local_port, remote_port));
+        if let Some(port) = ssh_port {
+            cmd.arg("-p").arg(port.to_string());
+        }
+        cmd.arg(target);
+        cmd.arg(format!("{} --bind 127.0.0.1:{}", remote_server_cmd, remote_port));
+
+        println!("[mosh-tcp client] Connecting to {} via SSH tunnel (local port {})...", target, local_port);
+        let mut child = cmd.spawn()?;
+
+        let local_addr = format!("127.0.0.1:{}", local_port);
+        let start = Instant::now();
+        let timeout = Duration::from_secs(15);
+
+        let stream = loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    format!("SSH child process exited unexpectedly with status: {}", status),
+                ));
+            }
+
+            if let Ok(stream) = TcpStream::connect(&local_addr) {
+                break stream;
+            }
+
+            if start.elapsed() > timeout {
+                let _ = child.kill();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Timed out waiting for SSH tunnel TCP connection",
+                ));
+            }
+
+            std::thread::sleep(Duration::from_millis(100));
+        };
+
+        Ok((SshTunnel { child, local_port }, stream))
+    }
+
+    pub fn local_port(&self) -> u16 {
+        self.local_port
+    }
+}
+
+impl Drop for SshTunnel {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+pub fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io::Result<()> {
+    let socket = TcpStream::connect(server_addr)?;
+    println!("[mosh-tcp client] Connected to {}", server_addr);
+    run_client_stream(socket, enable_predictive)
+}
+
+pub fn run_client_stream(mut socket: TcpStream, enable_predictive: bool) -> io::Result<()> {
     struct RawModeGuard;
     impl Drop for RawModeGuard {
         fn drop(&mut self) {
