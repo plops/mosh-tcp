@@ -24,12 +24,24 @@
 #define BUFFER_SIZE 65536
 #define DECOMPRESS_BUFFER_SIZE (256 * 1024)
 
+#include <sys/wait.h>
+
 static struct termios orig_termios;
 static int termios_saved = 0;
 static volatile sig_atomic_t g_sigwinch_pending = 0;
 static volatile sig_atomic_t g_running = 1;
+static volatile pid_t g_ssh_pid = -1;
+
+static void cleanup_ssh(void) {
+    if (g_ssh_pid > 0) {
+        kill(g_ssh_pid, SIGTERM);
+        waitpid(g_ssh_pid, NULL, 0);
+        g_ssh_pid = -1;
+    }
+}
 
 static void restore_terminal(void) {
+    cleanup_ssh();
     if (termios_saved) {
         tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios);
         termios_saved = 0;
@@ -181,54 +193,155 @@ static void process_packet(const unsigned char *payload, uint32_t len) {
     }
 }
 
+static int find_free_port(void) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return 4000;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(s);
+        return 4000;
+    }
+    socklen_t len = sizeof(addr);
+    if (getsockname(s, (struct sockaddr *)&addr, &len) < 0) {
+        close(s);
+        return 4000;
+    }
+    int p = ntohs(addr.sin_port);
+    close(s);
+    return p;
+}
+
 static void print_usage(const char *prog) {
     fprintf(stderr, "mosh-tcp-client-c - Lightweight C99/C11 mosh-tcp client\n\n");
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s [--connect <ADDR:PORT>]\n", prog);
+    fprintf(stderr, "  %s [options] [user@]host\n", prog);
+    fprintf(stderr, "  %s --connect <ADDR:PORT> [options]\n\n", prog);
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "  -c, --connect <ADDR:PORT>  Connect directly to mosh-tcp-server\n");
+    fprintf(stderr, "  -s, --ssh <COMMAND>        SSH command to run (default: ssh)\n");
+    fprintf(stderr, "  -p, --ssh-port <PORT>      Remote SSH port (default: 22)\n");
+    fprintf(stderr, "      --server <COMMAND>     Remote mosh-tcp-server binary (default: mosh-tcp-server)\n");
+    fprintf(stderr, "      --port <PORT>          Remote server listening port (default: 4000)\n");
+    fprintf(stderr, "  -h, --help                 Display this help message\n");
 }
 
 int main(int argc, char **argv) {
-    const char *connect_addr = "127.0.0.1";
-    int port = 4000;
+    const char *connect_arg = NULL;
+    const char *target_host = NULL;
+    const char *ssh_cmd = "ssh";
+    const char *ssh_port_str = NULL;
+    const char *server_cmd = "mosh-tcp-server";
+    int remote_port = 4000;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--connect") == 0 || strcmp(argv[i], "-c") == 0) {
-            if (i + 1 < argc) {
-                char *target = argv[++i];
-                char *colon = strrchr(target, ':');
-                if (colon) {
-                    *colon = '\0';
-                    connect_addr = target;
-                    port = atoi(colon + 1);
-                } else {
-                    connect_addr = target;
-                }
-            }
+            if (i + 1 < argc) connect_arg = argv[++i];
+        } else if (strcmp(argv[i], "--ssh") == 0 || strcmp(argv[i], "-s") == 0) {
+            if (i + 1 < argc) ssh_cmd = argv[++i];
+        } else if (strcmp(argv[i], "--ssh-port") == 0 || strcmp(argv[i], "-p") == 0) {
+            if (i + 1 < argc) ssh_port_str = argv[++i];
+        } else if (strcmp(argv[i], "--server") == 0) {
+            if (i + 1 < argc) server_cmd = argv[++i];
+        } else if (strcmp(argv[i], "--port") == 0) {
+            if (i + 1 < argc) remote_port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
+        } else if (argv[i][0] != '-' && !target_host) {
+            target_host = argv[i];
         }
     }
 
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    const char *connect_ip = "127.0.0.1";
+    int connect_port = 4000;
+
+    if (connect_arg) {
+        char *target = strdup(connect_arg);
+        char *colon = strrchr(target, ':');
+        if (colon) {
+            *colon = '\0';
+            connect_ip = target;
+            connect_port = atoi(colon + 1);
+        } else {
+            connect_ip = target;
+        }
+    } else if (target_host) {
+        int local_port = find_free_port();
+        connect_ip = "127.0.0.1";
+        connect_port = local_port;
+
+        char fwd_buf[128];
+        snprintf(fwd_buf, sizeof(fwd_buf), "%d:127.0.0.1:%d", local_port, remote_port);
+
+        char remote_cmd_buf[256];
+        snprintf(remote_cmd_buf, sizeof(remote_cmd_buf), "%s --bind 127.0.0.1:%d", server_cmd, remote_port);
+
+        char *ssh_argv[32];
+        int idx = 0;
+        ssh_argv[idx++] = (char *)ssh_cmd;
+        ssh_argv[idx++] = "-o";
+        ssh_argv[idx++] = "ExitOnForwardFailure=yes";
+        ssh_argv[idx++] = "-L";
+        ssh_argv[idx++] = fwd_buf;
+        if (ssh_port_str) {
+            ssh_argv[idx++] = "-p";
+            ssh_argv[idx++] = (char *)ssh_port_str;
+        }
+        ssh_argv[idx++] = (char *)target_host;
+        ssh_argv[idx++] = remote_cmd_buf;
+        ssh_argv[idx] = NULL;
+
+        fprintf(stderr, "[mosh-tcp client-c] Connecting to %s via SSH tunnel (local port %d)...\n", target_host, local_port);
+        pid_t pid = fork();
+        if (pid == 0) {
+            execvp(ssh_cmd, ssh_argv);
+            perror("execvp ssh failed");
+            _exit(1);
+        } else if (pid > 0) {
+            g_ssh_pid = pid;
+            atexit(cleanup_ssh);
+        } else {
+            perror("fork failed");
+            return 1;
+        }
+    }
+
+    int sock = -1;
+    int attempts = 0;
+    while (attempts < 150) {
+        if (g_ssh_pid > 0) {
+            int status;
+            if (waitpid(g_ssh_pid, &status, WNOHANG) > 0) {
+                fprintf(stderr, "SSH subprocess exited unexpectedly\n");
+                return 1;
+            }
+        }
+
+        sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock >= 0) {
+            struct sockaddr_in serv_addr;
+            memset(&serv_addr, 0, sizeof(serv_addr));
+            serv_addr.sin_family = AF_INET;
+            serv_addr.sin_port = htons(connect_port);
+            if (inet_pton(AF_INET, connect_ip, &serv_addr.sin_addr) > 0) {
+                if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) == 0) {
+                    break;
+                }
+            }
+            close(sock);
+            sock = -1;
+        }
+        usleep(100000);
+        attempts++;
+    }
+
     if (sock < 0) {
-        perror("socket creation failed");
-        return 1;
-    }
-
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, connect_addr, &serv_addr.sin_addr) <= 0) {
-        fprintf(stderr, "Invalid IP address: %s\n", connect_addr);
-        close(sock);
-        return 1;
-    }
-
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        perror("Connection to server failed");
-        close(sock);
+        fprintf(stderr, "Failed to connect to mosh-tcp server at %s:%d\n", connect_ip, connect_port);
+        cleanup_ssh();
         return 1;
     }
 
