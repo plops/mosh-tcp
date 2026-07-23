@@ -1,0 +1,16 @@
+Wir befinden uns im Repository Mosh TCP. Diese Software ist dafür da, dass man über langsame Internetverbindungen Terminalprogramme bedienen kann, auch wenn Programme sehr viele Daten ausgeben.
+Es funktioniert recht gut, aber der Lookin-Prozess ist etwas mühsam, weil man manuell eine SSH-V Verbindung mit einem Tunnel zu dem Server aufbauen muss.
+
+Mosh TCP ist ist informiert oder ahmt, das Originale Mosh (Quellen in /workspace/src/mosh) Programm nach. ist, aber in Rust implementiert.
+
+Ich möchte, dass du einen Plan erstellst und unter /workspace/src/mosh-tcp/plan/20260723_01/01_implementation_plan_<...>.md ablegest um den Login-Prozess zu streamlinen.
+Das heißt, wenn du auf der Klientenseite gestartet wirst, sollst du mit dem auf dem Klienten vorhandenen SSH-Programm eine Verbindung zum auf dem Server laufenden SSH-Server machen, den Tunnel aufbauen und dem auf den Server vorhandenen Mosh TCP-Server starten. Wir gehen davon aus, dass der Morsch TCP Server, der SSH-Client, eben keine spezifische pfadangabe brauchen.
+
+Du kannst DeepwikiMCP Fragen wie Mosh oder andere Programme so etwas implementieren. Du kannst auch in den hier vorhandenen Mosch Quellcode reinschauen.
+Stelle sicher, dass du die Implementierung für den C, C und Rust Klienten beschreibst. Aber für den ersten Schritt reicht es, einen Klienten zu entwickeln, die Entscheidung, welchen ist die überlassen. Wenn dieser die Tests erfüllt und die Spezifikation steht, dann soll die komplette Implementierung für die anderen folgen.
+
+Der Implementierungsplan soll umfangreich sein. Das heißt, er soll eine Liste aller wesentlichen Dateien, die angefasst oder die interessant sind, enthalten mit kurzer Beschreibung. Das erstreckt sich über die Quellcode-Dateien, als auch über die Dokumentation oder vielleicht frühere Spezifikationen. Dies ist notwendig, sodass der implementierende autonome Ai Agent seinen Kontext entsprechend aufbauen kann Ohne durch das gesamte Repository suchen zu müssen.
+
+Wenn Implementierungsschritte erfolgt sind, sollte Agent Commit Messages mit Conventional Commit Convention machen. Diese sollen umfangreich beschreiben, was passiert ist.
+
+Wenn der gesamte Plan implementiert ist, soll ein Walkthrough-Dokument in /workspace/src/mosh-tcp/plan/20260723_01/02_walkthrough.md abgelegt werden. Dieses soll beschreiben, was implementiert wurde, welche Dinge anders verlaufen sind nach den Tests und wo der Plan etwas geändert werden musste.
