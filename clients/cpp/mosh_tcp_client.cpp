@@ -27,12 +27,44 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/poll.h>
+#include <sys/wait.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
 #include "../c/puff.h"
 
 namespace mosh {
+
+class SshTunnel {
+private:
+    pid_t pid_{-1};
+
+public:
+    SshTunnel() = default;
+    explicit SshTunnel(pid_t pid) : pid_(pid) {}
+    ~SshTunnel() {
+        stop();
+    }
+    void stop() {
+        if (pid_ > 0) {
+            kill(pid_, SIGTERM);
+            waitpid(pid_, nullptr, 0);
+            pid_ = -1;
+        }
+    }
+    pid_t pid() const { return pid_; }
+    SshTunnel(const SshTunnel&) = delete;
+    SshTunnel& operator=(const SshTunnel&) = delete;
+    SshTunnel(SshTunnel&& other) noexcept : pid_(other.pid_) { other.pid_ = -1; }
+    SshTunnel& operator=(SshTunnel&& other) noexcept {
+        if (this != &other) {
+            stop();
+            pid_ = other.pid_;
+            other.pid_ = -1;
+        }
+        return *this;
+    }
+};
 
 struct ClientInput {
     std::vector<uint8_t> data;
@@ -290,53 +322,151 @@ static void handle_server_packet(const Packet& pkt) {
 
 } // namespace mosh
 
+static int find_free_port() {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return 4000;
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(s, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+        close(s);
+        return 4000;
+    }
+    socklen_t len = sizeof(addr);
+    if (getsockname(s, reinterpret_cast<struct sockaddr*>(&addr), &len) < 0) {
+        close(s);
+        return 4000;
+    }
+    int p = ntohs(addr.sin_port);
+    close(s);
+    return p;
+}
+
 static void print_usage(const char *prog) {
     std::cerr << "mosh-tcp-client-cpp - Standalone Modern C++20 mosh-tcp client\n\n"
               << "Usage:\n"
-              << "  " << prog << " [--connect <ADDR:PORT>]\n";
+              << "  " << prog << " [options] [user@]host\n"
+              << "  " << prog << " --connect <ADDR:PORT> [options]\n\n"
+              << "Options:\n"
+              << "  -c, --connect <ADDR:PORT>  Connect directly to mosh-tcp-server\n"
+              << "  -s, --ssh <COMMAND>        SSH command to run (default: ssh)\n"
+              << "  -p, --ssh-port <PORT>      Remote SSH port (default: 22)\n"
+              << "      --server <COMMAND>     Remote mosh-tcp-server binary (default: mosh-tcp-server)\n"
+              << "      --port <PORT>          Remote server listening port (default: 4000)\n"
+              << "  -h, --help                 Display this help message\n";
 }
 
 int main(int argc, char **argv) {
-    std::string connect_addr = "127.0.0.1";
-    int port = 4000;
+    std::optional<std::string> connect_arg;
+    std::optional<std::string> target_host;
+    std::string ssh_cmd = "ssh";
+    std::optional<std::string> ssh_port_str;
+    std::string server_cmd = "mosh-tcp-server";
+    int remote_port = 4000;
 
     for (int i = 1; i < argc; i++) {
         std::string_view arg = argv[i];
         if (arg == "--connect" || arg == "-c") {
-            if (i + 1 < argc) {
-                std::string target = argv[++i];
-                auto colon = target.rfind(':');
-                if (colon != std::string::npos) {
-                    connect_addr = target.substr(0, colon);
-                    port = std::stoi(target.substr(colon + 1));
-                } else {
-                    connect_addr = target;
-                }
-            }
+            if (i + 1 < argc) connect_arg = argv[++i];
+        } else if (arg == "--ssh" || arg == "-s") {
+            if (i + 1 < argc) ssh_cmd = argv[++i];
+        } else if (arg == "--ssh-port" || arg == "-p") {
+            if (i + 1 < argc) ssh_port_str = argv[++i];
+        } else if (arg == "--server") {
+            if (i + 1 < argc) server_cmd = argv[++i];
+        } else if (arg == "--port") {
+            if (i + 1 < argc) remote_port = std::stoi(argv[++i]);
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             return 0;
+        } else if (!arg.starts_with('-') && !target_host) {
+            target_host = std::string(arg);
         }
     }
 
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    std::string connect_ip = "127.0.0.1";
+    int connect_port = 4000;
+    mosh::SshTunnel ssh_tunnel;
+
+    if (connect_arg) {
+        std::string target = *connect_arg;
+        auto colon = target.rfind(':');
+        if (colon != std::string::npos) {
+            connect_ip = target.substr(0, colon);
+            connect_port = std::stoi(target.substr(colon + 1));
+        } else {
+            connect_ip = target;
+        }
+    } else if (target_host) {
+        int local_port = find_free_port();
+        connect_ip = "127.0.0.1";
+        connect_port = local_port;
+
+        char fwd_buf[128];
+        snprintf(fwd_buf, sizeof(fwd_buf), "%d:127.0.0.1:%d", local_port, remote_port);
+
+        char remote_cmd_buf[256];
+        snprintf(remote_cmd_buf, sizeof(remote_cmd_buf), "%s --bind 127.0.0.1:%d", server_cmd.c_str(), remote_port);
+
+        std::vector<char*> ssh_argv;
+        ssh_argv.push_back(const_cast<char*>(ssh_cmd.c_str()));
+        ssh_argv.push_back(const_cast<char*>("-o"));
+        ssh_argv.push_back(const_cast<char*>("ExitOnForwardFailure=yes"));
+        ssh_argv.push_back(const_cast<char*>("-L"));
+        ssh_argv.push_back(fwd_buf);
+        if (ssh_port_str) {
+            ssh_argv.push_back(const_cast<char*>("-p"));
+            ssh_argv.push_back(const_cast<char*>(ssh_port_str->c_str()));
+        }
+        ssh_argv.push_back(const_cast<char*>(target_host->c_str()));
+        ssh_argv.push_back(remote_cmd_buf);
+        ssh_argv.push_back(nullptr);
+
+        std::cerr << "[mosh-tcp client-cpp] Connecting to " << *target_host << " via SSH tunnel (local port " << local_port << ")...\n";
+        pid_t pid = fork();
+        if (pid == 0) {
+            execvp(ssh_cmd.c_str(), ssh_argv.data());
+            perror("execvp ssh failed");
+            _exit(1);
+        } else if (pid > 0) {
+            ssh_tunnel = mosh::SshTunnel(pid);
+        } else {
+            perror("fork failed");
+            return 1;
+        }
+    }
+
+    int sock = -1;
+    int attempts = 0;
+    while (attempts < 150) {
+        if (ssh_tunnel.pid() > 0) {
+            int status;
+            if (waitpid(ssh_tunnel.pid(), &status, WNOHANG) > 0) {
+                std::cerr << "SSH subprocess exited unexpectedly\n";
+                return 1;
+            }
+        }
+
+        sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock >= 0) {
+            struct sockaddr_in serv_addr{};
+            serv_addr.sin_family = AF_INET;
+            serv_addr.sin_port = htons(connect_port);
+            if (inet_pton(AF_INET, connect_ip.c_str(), &serv_addr.sin_addr) > 0) {
+                if (connect(sock, reinterpret_cast<struct sockaddr*>(&serv_addr), sizeof(serv_addr)) == 0) {
+                    break;
+                }
+            }
+            close(sock);
+            sock = -1;
+        }
+        usleep(100000);
+        attempts++;
+    }
+
     if (sock < 0) {
-        perror("socket creation failed");
-        return 1;
-    }
-
-    struct sockaddr_in serv_addr{};
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, connect_addr.c_str(), &serv_addr.sin_addr) <= 0) {
-        std::cerr << "Invalid IP address: " << connect_addr << "\n";
-        close(sock);
-        return 1;
-    }
-
-    if (connect(sock, reinterpret_cast<struct sockaddr*>(&serv_addr), sizeof(serv_addr)) < 0) {
-        perror("Connection to server failed");
-        close(sock);
+        std::cerr << "Failed to connect to mosh-tcp server at " << connect_ip << ":" << connect_port << "\n";
         return 1;
     }
 
