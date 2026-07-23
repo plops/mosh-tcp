@@ -5,7 +5,7 @@ use futures::stream::StreamExt;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
@@ -79,20 +79,19 @@ pub async fn run_server(
 
     let session_key_arc = Arc::new(session_key);
 
-    loop {
-        let (socket, client_addr) = listener.accept().await?;
+    while let Ok((socket, client_addr)) = listener.accept().await {
         eprintln!("[mosh-tcp server] Accepted connection from {}", client_addr);
         let frame_ms = 1000 / fps;
         let shell = shell_cmd.clone();
         let expected_key = Arc::clone(&session_key_arc);
 
-        tokio::spawn(async move {
-            if let Err(e) = handle_client(socket, frame_ms, max_kbps, enable_stats, shell, expected_key).await {
-                eprintln!("[mosh-tcp server] Client session error: {}", e);
-            }
-            eprintln!("[mosh-tcp server] Client disconnected: {}", client_addr);
-        });
+        if let Err(e) = handle_client(socket, frame_ms, max_kbps, enable_stats, shell, expected_key).await {
+            eprintln!("[mosh-tcp server] Client session error: {}", e);
+        }
+        eprintln!("[mosh-tcp server] Session finished for client {}", client_addr);
+        break;
     }
+    Ok(())
 }
 
 fn format_rate(bytes_per_sec: f64) -> String {
@@ -141,6 +140,9 @@ async fn handle_client(
     let state_pty = Arc::clone(&session_state);
     let telemetry = Arc::new(Telemetry::default());
     let telemetry_pty = Arc::clone(&telemetry);
+    let pty_closed = Arc::new(AtomicBool::new(false));
+    let pty_closed_reader = Arc::clone(&pty_closed);
+    let pty_closed_send = Arc::clone(&pty_closed);
 
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -168,6 +170,7 @@ async fn handle_client(
                 Err(_) => break,
             }
         }
+        pty_closed_reader.store(true, Ordering::Relaxed);
     });
 
     let framed = Framed::new(socket, PacketCodec::new());
@@ -238,6 +241,25 @@ async fn handle_client(
         const MAX_PTY_BUFFER_CAP: usize = 16384;
 
         loop {
+            if pty_closed_send.load(Ordering::Relaxed) {
+                let remaining_bytes = if let Ok(mut state) = state_send.lock() {
+                    std::mem::take(&mut state.pty_buffer)
+                } else {
+                    Vec::new()
+                };
+                if !remaining_bytes.is_empty() {
+                    seq += 1;
+                    let (payload, compressed) = Packet::compress_data(&remaining_bytes);
+                    let packet = Packet::ServerFrame {
+                        seq,
+                        data: payload,
+                        compressed,
+                    };
+                    let _ = writer.send(packet).await;
+                }
+                break;
+            }
+
             frame_timer.tick().await;
             let now = Instant::now();
             let elapsed_secs = now.duration_since(last_tick).as_secs_f64();
@@ -336,65 +358,69 @@ async fn handle_client(
     let pty_writer_input = Arc::clone(&pty_writer);
     let telemetry_ping = Arc::clone(&telemetry);
 
-    while let Some(packet_result) = reader.next().await {
-        match packet_result {
-            Ok(Packet::ClientHandshake { session_key, rows, cols }) => {
-                if !session_key.is_empty() && session_key != *expected_key {
-                    eprintln!("[mosh-tcp server] Session key mismatch! Dropping client.");
-                    anyhow::bail!("Session authentication key mismatch");
-                }
-                let rows = rows.max(1);
-                let cols = cols.max(1);
-                if let Ok(m) = master_resize.lock() {
-                    let _ = m.resize(PtySize {
-                        rows,
-                        cols,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    });
-                }
-                if let Ok(mut state) = state_resize.lock() {
-                    state.vt_parser = Vt100Parser::new(rows, cols, 1000);
+    tokio::select! {
+        _ = send_task => {},
+        _ = async {
+            while let Some(packet_result) = reader.next().await {
+                match packet_result {
+                    Ok(Packet::ClientHandshake { session_key, rows, cols }) => {
+                        if !session_key.is_empty() && session_key != *expected_key {
+                            eprintln!("[mosh-tcp server] Session key mismatch! Dropping client.");
+                            break;
+                        }
+                        let rows = rows.max(1);
+                        let cols = cols.max(1);
+                        if let Ok(m) = master_resize.lock() {
+                            let _ = m.resize(PtySize {
+                                rows,
+                                cols,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            });
+                        }
+                        if let Ok(mut state) = state_resize.lock() {
+                            state.vt_parser = Vt100Parser::new(rows, cols, 1000);
+                        }
+                    }
+                    Ok(Packet::ClientInput { data }) => {
+                        if let Ok(mut w) = pty_writer_input.lock() {
+                            let _ = w.write_all(&data);
+                            let _ = w.flush();
+                        }
+                    }
+                    Ok(Packet::ClientResize { rows, cols }) => {
+                        let rows = rows.max(1);
+                        let cols = cols.max(1);
+                        if let Ok(m) = master_resize.lock() {
+                            let _ = m.resize(PtySize {
+                                rows,
+                                cols,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            });
+                        }
+                        if let Ok(mut state) = state_resize.lock() {
+                            state.vt_parser = Vt100Parser::new(rows, cols, 1000);
+                        }
+                    }
+                    Ok(Packet::Ping { timestamp }) => {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let rtt = now_ms.saturating_sub(timestamp);
+                        telemetry_ping.rtt_ms.store(rtt, Ordering::Relaxed);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("[mosh-tcp server] Packet decode error: {}", e);
+                        break;
+                    }
                 }
             }
-            Ok(Packet::ClientInput { data }) => {
-                if let Ok(mut w) = pty_writer_input.lock() {
-                    let _ = w.write_all(&data);
-                    let _ = w.flush();
-                }
-            }
-            Ok(Packet::ClientResize { rows, cols }) => {
-                let rows = rows.max(1);
-                let cols = cols.max(1);
-                if let Ok(m) = master_resize.lock() {
-                    let _ = m.resize(PtySize {
-                        rows,
-                        cols,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    });
-                }
-                if let Ok(mut state) = state_resize.lock() {
-                    state.vt_parser = Vt100Parser::new(rows, cols, 1000);
-                }
-            }
-            Ok(Packet::Ping { timestamp }) => {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let rtt = now_ms.saturating_sub(timestamp);
-                telemetry_ping.rtt_ms.store(rtt, Ordering::Relaxed);
-            }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("[mosh-tcp server] Packet decode error: {}", e);
-                break;
-            }
-        }
+        } => {}
     }
 
-    send_task.abort();
     if let Some(h) = stats_handle {
         h.abort();
     }

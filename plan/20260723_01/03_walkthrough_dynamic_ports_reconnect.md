@@ -58,16 +58,23 @@ Using architectural principles from original Mosh (`mobile-shell/mosh` queried v
 
 ---
 
-## 4. Verification & Release Build Results
+### 4.2 Stdin Swallowing & Keystroke Responsiveness Fix
+- **Root Cause**: Spawning child SSH processes (`launch_pid` and `tunnel_pid`) without explicit STDIN redirection caused child processes to inherit `STDIN_FILENO`. OpenSSH and `mock_ssh.sh` swallowed keypresses intended for the terminal event loop, forcing the user to press keys multiple times.
+- **Fix**: Redirected child process `STDIN_FILENO` to `/dev/null` (`Stdio::null()` in Rust, `dup2(devnull, STDIN_FILENO)` in C/C++).
+- **PTY EOF Teardown**: Updated `mosh-tcp-server` with `tokio::select!` so when the remote shell process exits (`exit` command or `Ctrl-D`), `send_task` force flushes remaining buffer bytes, closes the socket cleanly, and exits `mosh-tcp-server`.
 
-### 4.1 Integration Test Matrix
+---
+
+## 5. Verification & Release Build Results
+
+### 5.1 Integration Test Matrix
 Command:
 ```bash
 cargo test
 ```
-Result: All 18 tests passed cleanly across Rust unit tests, C client integration, C++ client integration, cross-client protocol matrix, rate-limiting tests, tmux tests, VT100 resize tests, and SSH login tests.
+Result: All integration tests passed cleanly across Rust unit tests, C client integration, C++ client integration, cross-client protocol matrix, rate-limiting tests, tmux tests, VT100 resize tests, keystroke reliability, and SSH login clean exit tests.
 
-### 4.2 Release Build Execution
+### 5.2 Release Build Execution
 Command:
 ```bash
 ./build_release.sh
@@ -76,4 +83,5 @@ Binaries compiled:
 - `clients/c/mosh-tcp-client-c` (35 KB raw)
 - `clients/cpp/mosh-tcp-client-cpp` (54 KB raw)
 - `target/release/mosh-tcp-client` (533 KB raw)
-- `target/release/mosh-tcp-server` (706 KB raw)
+- `target/release/mosh-tcp-server` (702 KB raw)
+

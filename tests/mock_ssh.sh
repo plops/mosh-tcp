@@ -29,7 +29,7 @@ done
 
 if [ "$IS_TUNNEL" -eq 1 ]; then
     # Relay TCP connections from LOCAL_PORT to REMOTE_PORT
-    python3 -c "
+    exec python3 -c "
 import socket, threading, sys
 
 l_port = int(sys.argv[1])
@@ -38,13 +38,14 @@ r_port = int(sys.argv[2])
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(('127.0.0.1', l_port))
+server.settimeout(0.5)
 server.listen(5)
 
 def handle(client_sock):
     remote_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         remote_sock.connect(('127.0.0.1', r_port))
-    except Exception as e:
+    except Exception:
         client_sock.close()
         return
 
@@ -54,22 +55,26 @@ def handle(client_sock):
                 data = src.recv(4096)
                 if not data: break
                 dst.sendall(data)
-        except:
+        except Exception:
             pass
         finally:
-            src.close()
-            dst.close()
+            try: src.close()
+            except Exception: pass
+            try: dst.close()
+            except Exception: pass
 
-    t1 = threading.Thread(target=forward, args=(client_sock, remote_sock))
-    t2 = threading.Thread(target=forward, args=(remote_sock, client_sock))
+    t1 = threading.Thread(target=forward, args=(client_sock, remote_sock), daemon=True)
+    t2 = threading.Thread(target=forward, args=(remote_sock, client_sock), daemon=True)
     t1.start()
     t2.start()
 
 while True:
     try:
         cs, _ = server.accept()
-        threading.Thread(target=handle, args=(cs,)).start()
-    except:
+        threading.Thread(target=handle, args=(cs,), daemon=True).start()
+    except socket.timeout:
+        continue
+    except Exception:
         break
 " "$LOCAL_PORT" "$REMOTE_PORT"
 else

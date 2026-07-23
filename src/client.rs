@@ -38,6 +38,7 @@ impl SshTunnel {
     ) -> io::Result<(Self, TcpStream, String)> {
         // Step 1: Launch mosh-tcp-server on remote host via SSH stdout capture
         let mut launch_cmd = Command::new(ssh_cmd);
+        launch_cmd.stdin(std::process::Stdio::null());
         if let Some(port) = ssh_port {
             launch_cmd.arg("-p").arg(port.to_string());
         }
@@ -86,6 +87,7 @@ impl SshTunnel {
         drop(listener);
 
         let mut tunnel_cmd = Command::new(ssh_cmd);
+        tunnel_cmd.stdin(std::process::Stdio::null());
         tunnel_cmd.arg("-o").arg("ExitOnForwardFailure=yes");
         tunnel_cmd.arg("-N");
         tunnel_cmd.arg("-L").arg(format!("{}:127.0.0.1:{}", local_port, bound_port));

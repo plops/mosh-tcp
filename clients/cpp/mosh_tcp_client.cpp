@@ -28,6 +28,7 @@
 #include <sys/ioctl.h>
 #include <sys/poll.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -37,30 +38,44 @@ namespace mosh {
 
 class SshTunnel {
 private:
-    pid_t pid_{-1};
+    pid_t launcher_pid_{-1};
+    pid_t tunnel_pid_{-1};
 
 public:
     SshTunnel() = default;
-    explicit SshTunnel(pid_t pid) : pid_(pid) {}
+    SshTunnel(pid_t launcher_pid, pid_t tunnel_pid)
+        : launcher_pid_(launcher_pid), tunnel_pid_(tunnel_pid) {}
     ~SshTunnel() {
         stop();
     }
     void stop() {
-        if (pid_ > 0) {
-            kill(pid_, SIGTERM);
-            waitpid(pid_, nullptr, 0);
-            pid_ = -1;
+        if (tunnel_pid_ > 0) {
+            kill(tunnel_pid_, SIGTERM);
+            waitpid(tunnel_pid_, nullptr, 0);
+            tunnel_pid_ = -1;
+        }
+        if (launcher_pid_ > 0) {
+            kill(launcher_pid_, SIGTERM);
+            waitpid(launcher_pid_, nullptr, 0);
+            launcher_pid_ = -1;
         }
     }
-    pid_t pid() const { return pid_; }
+    pid_t tunnel_pid() const { return tunnel_pid_; }
+    pid_t launcher_pid() const { return launcher_pid_; }
     SshTunnel(const SshTunnel&) = delete;
     SshTunnel& operator=(const SshTunnel&) = delete;
-    SshTunnel(SshTunnel&& other) noexcept : pid_(other.pid_) { other.pid_ = -1; }
+    SshTunnel(SshTunnel&& other) noexcept
+        : launcher_pid_(other.launcher_pid_), tunnel_pid_(other.tunnel_pid_) {
+        other.launcher_pid_ = -1;
+        other.tunnel_pid_ = -1;
+    }
     SshTunnel& operator=(SshTunnel&& other) noexcept {
         if (this != &other) {
             stop();
-            pid_ = other.pid_;
-            other.pid_ = -1;
+            launcher_pid_ = other.launcher_pid_;
+            tunnel_pid_ = other.tunnel_pid_;
+            other.launcher_pid_ = -1;
+            other.tunnel_pid_ = -1;
         }
         return *this;
     }
@@ -443,6 +458,11 @@ int main(int argc, char **argv) {
         std::cerr << "[mosh-tcp client-cpp] Launching server on " << *target_host << " via SSH...\n";
         pid_t launch_pid = fork();
         if (launch_pid == 0) {
+            int devnull = open("/dev/null", O_RDWR);
+            if (devnull >= 0) {
+                dup2(devnull, STDIN_FILENO);
+                close(devnull);
+            }
             close(pipefds[0]);
             dup2(pipefds[1], STDOUT_FILENO);
             close(pipefds[1]);
@@ -497,11 +517,16 @@ int main(int argc, char **argv) {
         std::cerr << "[mosh-tcp client-cpp] Established tunnel (local port " << local_port << " -> remote port " << bound_port << ")...\n";
         pid_t pid = fork();
         if (pid == 0) {
+            int devnull = open("/dev/null", O_RDWR);
+            if (devnull >= 0) {
+                dup2(devnull, STDIN_FILENO);
+                close(devnull);
+            }
             execvp(ssh_cmd.c_str(), ssh_argv.data());
             perror("execvp ssh tunnel failed");
             _exit(1);
         } else if (pid > 0) {
-            ssh_tunnel = mosh::SshTunnel(pid);
+            ssh_tunnel = mosh::SshTunnel(launch_pid, pid);
         } else {
             perror("fork failed");
             return 1;
@@ -511,9 +536,9 @@ int main(int argc, char **argv) {
     int sock = -1;
     int attempts = 0;
     while (attempts < 150) {
-        if (ssh_tunnel.pid() > 0) {
+        if (ssh_tunnel.tunnel_pid() > 0) {
             int status;
-            if (waitpid(ssh_tunnel.pid(), &status, WNOHANG) > 0) {
+            if (waitpid(ssh_tunnel.tunnel_pid(), &status, WNOHANG) > 0) {
                 std::cerr << "SSH subprocess exited unexpectedly\n";
                 return 1;
             }
@@ -576,13 +601,14 @@ int main(int argc, char **argv) {
             break;
         }
 
-        if (fds[0].revents & POLLIN) {
+        if ((fds[0].fd >= 0) && (fds[0].revents & POLLIN)) {
             ssize_t n = read(STDIN_FILENO, in_buf.data(), in_buf.size());
             if (n > 0) {
                 std::vector<uint8_t> input_data(in_buf.begin(), in_buf.begin() + n);
                 if (!mosh::send_framed_packet(sock, mosh::ClientInput{ .data = input_data })) break;
             } else if (n == 0) {
-                break;
+                mosh::send_framed_packet(sock, mosh::ClientInput{ .data = { 0x04 } });
+                fds[0].fd = -1;
             }
         }
 

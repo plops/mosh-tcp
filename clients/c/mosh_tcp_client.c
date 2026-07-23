@@ -31,12 +31,24 @@ static int termios_saved = 0;
 static volatile sig_atomic_t g_sigwinch_pending = 0;
 static volatile sig_atomic_t g_running = 1;
 static volatile pid_t g_ssh_pid = -1;
+static volatile pid_t g_ssh_launcher_pid = -1;
 
 static void cleanup_ssh(void) {
     if (g_ssh_pid > 0) {
+        fprintf(stderr, "[mosh-tcp client-c DEBUG] Killing tunnel PID %d...\n", (int)g_ssh_pid);
         kill(g_ssh_pid, SIGTERM);
+        fprintf(stderr, "[mosh-tcp client-c DEBUG] Waiting for tunnel PID %d...\n", (int)g_ssh_pid);
         waitpid(g_ssh_pid, NULL, 0);
+        fprintf(stderr, "[mosh-tcp client-c DEBUG] Tunnel PID %d exited.\n", (int)g_ssh_pid);
         g_ssh_pid = -1;
+    }
+    if (g_ssh_launcher_pid > 0) {
+        fprintf(stderr, "[mosh-tcp client-c DEBUG] Killing launcher PID %d...\n", (int)g_ssh_launcher_pid);
+        kill(g_ssh_launcher_pid, SIGTERM);
+        fprintf(stderr, "[mosh-tcp client-c DEBUG] Waiting for launcher PID %d...\n", (int)g_ssh_launcher_pid);
+        waitpid(g_ssh_launcher_pid, NULL, 0);
+        fprintf(stderr, "[mosh-tcp client-c DEBUG] Launcher PID %d exited.\n", (int)g_ssh_launcher_pid);
+        g_ssh_launcher_pid = -1;
     }
 }
 
@@ -319,12 +331,20 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[mosh-tcp client-c] Launching server on %s via SSH...\n", target_host);
         pid_t launch_pid = fork();
         if (launch_pid == 0) {
+            int devnull = open("/dev/null", O_RDWR);
+            if (devnull >= 0) {
+                dup2(devnull, STDIN_FILENO);
+                close(devnull);
+            }
             close(pipefds[0]);
             dup2(pipefds[1], STDOUT_FILENO);
             close(pipefds[1]);
             execvp(ssh_cmd, launch_argv);
             perror("execvp ssh launcher failed");
             _exit(1);
+        } else if (launch_pid > 0) {
+            g_ssh_launcher_pid = launch_pid;
+            atexit(cleanup_ssh);
         }
         close(pipefds[1]);
 
@@ -373,6 +393,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[mosh-tcp client-c] Established tunnel (local port %d -> remote port %d)...\n", local_port, bound_port);
         pid_t pid = fork();
         if (pid == 0) {
+            int devnull = open("/dev/null", O_RDWR);
+            if (devnull >= 0) {
+                dup2(devnull, STDIN_FILENO);
+                close(devnull);
+            }
             execvp(ssh_cmd, ssh_argv);
             perror("execvp ssh tunnel failed");
             _exit(1);
@@ -456,12 +481,14 @@ int main(int argc, char **argv) {
         }
 
         /* Handle STDIN input */
-        if (fds[0].revents & POLLIN) {
+        if ((fds[0].fd >= 0) && (fds[0].revents & POLLIN)) {
             ssize_t n = read(STDIN_FILENO, in_buf, 4096);
             if (n > 0) {
                 if (send_input(sock, in_buf, (uint32_t)n) < 0) break;
             } else if (n == 0) {
-                break; /* EOF on stdin */
+                unsigned char eot = 0x04;
+                send_input(sock, &eot, 1);
+                fds[0].fd = -1;
             }
         }
 
