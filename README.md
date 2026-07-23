@@ -59,61 +59,50 @@ Many mobile network providers offer low-speed free internet tiers (e.g., capped 
 
 ## 🚀 Quick Start & Usage
 
-### Step 1: Start the Server on your Remote VPS
+### Streamlined SSH Login (Recommended)
 
-Run `mosh-tcp-server` on your remote VPS. By default, it listens on port `4000` and caps bandwidth at 6 kB/s:
-
-```bash
-# Basic usage (defaults: 0.0.0.0:4000, 50 FPS, 6 KB/s max bandwidth)
-./mosh-tcp-server
-
-# Custom parameters:
-./mosh-tcp-server --bind 127.0.0.1:4000 --max-kbps 6 --fps 50 --stats --shell /bin/zsh
-```
-
-**Server Command-Line Options:**
-* `--bind <ADDR:PORT>` / `-b`: Network interface and port to bind (default: `0.0.0.0:4000`).
-* `--max-kbps <KB/S>`: Maximum network bandwidth limit in KB/s (default: `6`).
-* `--fps <FPS>`: Frame rate in frames per second (default: `50`, equivalent to 20ms per frame).
-* `--stats`: Enable real-time bandwidth, compression ratio, and skipped-frame telemetry printing.
-* `--shell <PATH>`: Custom shell executable to launch (default: `$SHELL` or `/bin/bash`).
-
----
-
-### Step 2: Establish an SSH Tunnel from your Local Machine
-
-Since `mosh-tcp` relies on standard SSH for encryption and authentication, create a TCP port-forwarding tunnel to your VPS:
+`mosh-tcp` clients automatically handle SSH authentication, port forwarding tunnel creation, and remote `mosh-tcp-server` execution in a single command!
 
 ```bash
-ssh -N -L 4000:localhost:4000 user@your-vps.com
-```
+# Connect using Rust client (with predictive local echo)
+mosh-tcp-client user@your-vps.com --predict
 
-*(If your client machine is behind CGNAT and cannot initiate direct connections, you can also use reverse port forwarding via `ssh -R`).*
+# Connect using POSIX C client (minimal embedded binary)
+mosh-tcp-client-c user@your-vps.com
 
----
-
-### Step 3: Connect using your Preferred Client
-
-Once the SSH tunnel is active, connect locally to `127.0.0.1:4000`:
-
-#### Option A: C Client (Recommended for embedded / low-memory hosts)
-```bash
-./mosh-tcp-client-c --connect 127.0.0.1:4000
-```
-
-#### Option B: C++ Client (Modern C++20 implementation)
-```bash
-./mosh-tcp-client-cpp --connect 127.0.0.1:4000
-```
-
-#### Option C: Rust Client (Recommended for desktops with local predictive echo)
-```bash
-./mosh-tcp-client --connect 127.0.0.1:4000 --predict
+# Connect using Modern C++20 client
+mosh-tcp-client-cpp user@your-vps.com
 ```
 
 **Client Command-Line Options:**
-* `--connect <ADDR:PORT>` / `-c`: Target server address (default: `127.0.0.1:4000`).
+* `[user@]host`: Remote SSH destination host.
+* `--ssh <COMMAND>` / `-s`: Custom SSH executable path (default: `ssh`).
+* `--ssh-port <PORT>` / `-p`: Remote SSH server port (default: `22`).
+* `--server <COMMAND>`: Remote `mosh-tcp-server` binary path (default: `mosh-tcp-server`).
+* `--port <PORT>`: Remote server port to bind over SSH tunnel (default: `4000`).
+* `--connect <ADDR:PORT>` / `-c`: Direct TCP connection mode (bypasses SSH).
 * `--predict`: Enable 2D cell local predictive echo (Rust client only).
+
+---
+
+### Manual / Direct Server Execution
+
+If you prefer to start `mosh-tcp-server` manually or manage your own SSH tunnel:
+
+1. **Start the Server on your Remote VPS:**
+   ```bash
+   mosh-tcp-server --bind 127.0.0.1:4000 --max-kbps 6 --fps 50
+   ```
+
+2. **Create an SSH Tunnel from Local Machine:**
+   ```bash
+   ssh -N -L 4000:127.0.0.1:4000 user@your-vps.com
+   ```
+
+3. **Connect via Direct Mode:**
+   ```bash
+   mosh-tcp-client --connect 127.0.0.1:4000 --predict
+   ```
 
 ---
 

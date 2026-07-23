@@ -85,20 +85,21 @@ Das Herzstück der Serverkomponente:
 3. **Token Bucket Rate Limiter:** Garantiert, dass die Netzwerkauslastung das konfigurierte Limit (z. B. 6 KB/s) nicht überschreitet.
 4. **Atomic VT100 Frame Generator:** Verhindert ANSI-Escape-Sequenz-Korruption bei großen Datenströmen (> 16 KB) durch Erzeugung atomarer Bildschirmframes (`\x1b[H\x1b[2J`).
 
-### 3.3 `src/client.rs` & `src/bin/mosh_tcp_client.rs` – Synchroner Rust Client
-1. **Multi-Threading Architektur:**
+### 3.3 `src/client.rs` & `src/bin/mosh_tcp_client.rs` – Synchroner Rust Client & SSH Supervisor
+1. **Streamlined SSH Login & Process Supervisor (`SshTunnel`):** Spawnt den SSH-Prozess (`Command::new("ssh")`) mit `-o ExitOnForwardFailure=yes -L <local_port>:127.0.0.1:<remote_port>`, startet `mosh-tcp-server` auf dem Zielhost und verbindet sich automatisch über den lokalen Tunnel.
+2. **Multi-Threading Architektur:**
    - Thread 1: Tastatureingaben & Crossterm-Events -> `std::sync::mpsc::channel`
    - Thread 2: Netzwerk-Sender (Liest Channel -> schreibt in Socket)
    - Main Thread: Netzwerk-Empfänger (Blockiert auf Socket -> rendert Frames)
-2. **SGR 1006 Extended Mouse Engine:** Übersetzt Mausereignisse (Klick, Drag, Scroll) in SGR 1006 Sequenzen (`\x1b[<{button};{col};{row}M/m`).
+3. **SGR 1006 Extended Mouse Engine:** Übersetzt Mausereignisse (Klick, Drag, Scroll) in SGR 1006 Sequenzen (`\x1b[<{button};{col};{row}M/m`).
 
 ### 3.4 `clients/c/` – Standalone POSIX C99/C11 Client
-1. **`mosh_tcp_client.c`:** POSIX C99/C11 Implementation mit `socket()`, `termios` Raw Mode, `poll()` Input-Multiplexing und `SIGWINCH`/`SIGINT`/`SIGTERM` Signal-Handlern.
+1. **`mosh_tcp_client.c`:** POSIX C99/C11 Implementation mit `socket()`, `termios` Raw Mode, `poll()` Input-Multiplexing, `fork()`+`execvp()` SSH-Prozessverwaltung (`g_ssh_pid`), automatischer Tunnel-Polling-Schleife und Signal-Handlern.
 2. **`puff.c` & `puff.h`:** Mark Adler Inflate Decompressor + Gzip Stream Header Parser für **zero-dependency** Compilation ohne `-lz`.
 3. **Target Binary:** `mosh-tcp-client-c` (**14 KB UPX LZMA**).
 
 ### 3.5 `clients/cpp/` – Standalone Modern C++20 Client
-1. **`mosh_tcp_client.cpp`:** C++20 Implementation mit RAII `TerminalGuard` für automatische Terminal-Wiederherstellung im Destruktor, `std::span` für bounds-checked Zero-Copy Deserialisierung und `std::variant` / `std::visit` für typsicheres Pattern Matching.
+1. **`mosh_tcp_client.cpp`:** C++20 Implementation mit RAII `TerminalGuard` und `SshTunnel`-Guard für automatische Terminal- und Kindprozess-Wiederherstellung im Destruktor, `std::span` für bounds-checked Zero-Copy Deserialisierung und `std::variant` / `std::visit` für typsicheres Pattern Matching.
 2. **Target Binary:** `mosh-tcp-client-cpp` (**19 KB UPX LZMA**).
 
 ### 3.6 `src/predictive.rs` & `src/ansi.rs` – 2D Grid Predictive Echo Engine
