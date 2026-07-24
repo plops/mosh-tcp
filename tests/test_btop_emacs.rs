@@ -35,3 +35,115 @@ fn test_emacs_bracketed_paste_sequence_integrity() {
     let body = &paste_payload[6..paste_payload.len() - 6];
     assert_eq!(body, pasted_text.as_bytes());
 }
+
+#[test]
+fn test_btop_rendering_integration() {
+    if std::process::Command::new("btop").arg("--version").output().is_err() {
+        eprintln!("btop not found on system, skipping integration test");
+        return;
+    }
+
+    let bin_server = env!("CARGO_BIN_EXE_mosh-tcp-server");
+    let bin_client = env!("CARGO_BIN_EXE_mosh-tcp-client");
+
+    let mut server = std::process::Command::new(bin_server)
+        .args(["--bind", "127.0.0.1:15556", "--shell", "btop"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("Failed to start mosh-tcp-server");
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let mut client = std::process::Command::new(bin_client)
+        .args(["-c", "127.0.0.1:15556"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("Failed to start mosh-tcp-client");
+
+    let mut client_stdout = client.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = client_stdout.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            if tx.send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+
+    let start = std::time::Instant::now();
+    let mut received = Vec::new();
+    while start.elapsed() < std::time::Duration::from_millis(1500) {
+        while let Ok(chunk) = rx.try_recv() {
+            received.extend_from_slice(&chunk);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let _ = client.kill();
+    let _ = server.kill();
+
+    assert!(!received.is_empty(), "Client should receive btop rendering stream");
+}
+
+#[test]
+fn test_emacs_rendering_integration() {
+    if std::process::Command::new("emacs").arg("--version").output().is_err() {
+        eprintln!("emacs not found on system, skipping integration test");
+        return;
+    }
+
+    let bin_server = env!("CARGO_BIN_EXE_mosh-tcp-server");
+    let bin_client = env!("CARGO_BIN_EXE_mosh-tcp-client");
+
+    let mut server = std::process::Command::new(bin_server)
+        .args(["--bind", "127.0.0.1:15557", "--shell", "emacs -nw"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("Failed to start mosh-tcp-server");
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let mut client = std::process::Command::new(bin_client)
+        .args(["-c", "127.0.0.1:15557"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("Failed to start mosh-tcp-client");
+
+    let mut client_stdout = client.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = client_stdout.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            if tx.send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+
+    let start = std::time::Instant::now();
+    let mut received = Vec::new();
+    while start.elapsed() < std::time::Duration::from_millis(1500) {
+        while let Ok(chunk) = rx.try_recv() {
+            received.extend_from_slice(&chunk);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let _ = client.kill();
+    let _ = server.kill();
+
+    assert!(!received.is_empty(), "Client should receive emacs rendering stream");
+}

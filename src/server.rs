@@ -1,4 +1,4 @@
-use crate::ansi::{find_safe_split_point, strip_terminal_queries_stateful};
+use crate::ansi::find_safe_split_point;
 use crate::protocol::{Packet, PacketCodec};
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
@@ -126,7 +126,12 @@ async fn handle_client(
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
     });
 
-    let mut cmd = CommandBuilder::new(&shell);
+    let mut parts = shell.split_whitespace();
+    let bin = parts.next().unwrap_or("/bin/bash");
+    let mut cmd = CommandBuilder::new(bin);
+    for arg in parts {
+        cmd.arg(arg);
+    }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     let mut _child = pair.slave.spawn_command(cmd)?;
@@ -298,32 +303,21 @@ async fn handle_client(
                     } else if state.pty_buffer.is_empty() {
                         None
                     } else {
-                        // Normal throughput: apply query stripping and send clean raw chunk
-                        let (cleaned, remaining) = strip_terminal_queries_stateful(&state.pty_buffer);
-                        state.pty_buffer = remaining;
+                        // Normal throughput: pass raw PTY buffer directly through
+                        let raw_buf = std::mem::take(&mut state.pty_buffer);
+                        let available = raw_buf.len();
+                        let split_point = find_safe_split_point(&raw_buf, tokens as usize);
 
-                        if cleaned.is_empty() {
-                            None
-                        } else {
-                            let available = cleaned.len();
-                            let split_point = find_safe_split_point(&cleaned, tokens as usize);
-
-                            if split_point > 0 {
-                                let chunk = cleaned[..split_point].to_vec();
-                                if split_point < available {
-                                    let rest = &cleaned[split_point..];
-                                    let mut new_guard = rest.to_vec();
-                                    new_guard.extend_from_slice(&state.pty_buffer);
-                                    state.pty_buffer = new_guard;
-                                }
-                                Some(chunk)
-                            } else {
-                                let mut new_guard = cleaned;
-                                new_guard.extend_from_slice(&state.pty_buffer);
-                                state.pty_buffer = new_guard;
-                                telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
-                                None
+                        if split_point > 0 {
+                            let chunk = raw_buf[..split_point].to_vec();
+                            if split_point < available {
+                                state.pty_buffer = raw_buf[split_point..].to_vec();
                             }
+                            Some(chunk)
+                        } else {
+                            state.pty_buffer = raw_buf;
+                            telemetry_send.frames_skipped.fetch_add(1, Ordering::Relaxed);
+                            None
                         }
                     }
                 } else {

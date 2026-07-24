@@ -2,6 +2,7 @@ use crate::predictive::LocalPredictor;
 use crate::protocol::Packet;
 #[allow(unused_imports)]
 use crossterm::event::MouseEvent;
+#[allow(unused_imports)]
 use crossterm::event::{
     self, DisableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
     MouseEventKind,
@@ -53,7 +54,7 @@ impl SshTunnel {
         launch_cmd.stdout(std::process::Stdio::piped());
         launch_cmd.stderr(std::process::Stdio::inherit());
 
-        println!("[mosh-tcp client] Launching server on {} via SSH...", target);
+        eprintln!("[mosh-tcp client] Launching server on {} via SSH...", target);
         let mut launcher_child = launch_cmd.spawn()?;
 
         let mut bound_port = remote_port;
@@ -96,7 +97,7 @@ impl SshTunnel {
         }
         tunnel_cmd.arg(target);
 
-        println!(
+        eprintln!(
             "[mosh-tcp client] Established tunnel (local port {} -> remote port {})...",
             local_port, bound_port
         );
@@ -168,7 +169,7 @@ impl Drop for SshTunnel {
 
 pub fn run_client(server_addr: SocketAddr, enable_predictive: bool) -> io::Result<()> {
     let socket = TcpStream::connect(server_addr)?;
-    println!("[mosh-tcp client] Connected to {}", server_addr);
+    eprintln!("[mosh-tcp client] Connected to {}", server_addr);
     run_client_stream_handshake(socket, enable_predictive, "")
 }
 
@@ -220,75 +221,44 @@ pub fn run_client_stream_handshake(
     let predictor_input = Arc::clone(&predictor);
 
     std::thread::spawn(move || {
-        let mut filter = ResponseFilter::new();
-        let is_tty = crossterm::tty::IsTty::is_tty(&std::io::stdin());
+        let mut buf = [0u8; 4096];
+        let mut last_size = size().unwrap_or((80, 24));
 
         while running_clone.load(Ordering::Relaxed) {
-            if is_tty {
-                if event::poll(std::time::Duration::from_millis(20)).unwrap_or(false) {
-                    match event::read() {
-                        Ok(Event::Key(key_event)) => {
-                            if key_event.code == KeyCode::Char('q')
-                                && key_event.modifiers.contains(KeyModifiers::CONTROL)
-                            {
-                                running_clone.store(false, Ordering::Relaxed);
-                                break;
-                            }
-
-                            let raw_data = key_event_to_bytes(key_event);
-                            if !raw_data.is_empty() {
-                                let clean_data = filter.filter(&raw_data);
-
-                                if !clean_data.is_empty() {
-                                    if let Ok(mut pred) = predictor_input.lock() {
-                                        let _ = pred.handle_keystroke(&clean_data);
-                                    }
-                                    let _ = input_tx.send(Packet::ClientInput { data: clean_data });
-                                }
-                            }
-                        }
-                        Ok(Event::Paste(text)) => {
-                            if !text.is_empty() {
-                                if let Ok(mut pred) = predictor_input.lock() {
-                                    pred.reset();
-                                }
-                                let mut paste_data = Vec::with_capacity(text.len() + 12);
-                                paste_data.extend_from_slice(b"\x1b[200~");
-                                paste_data.extend_from_slice(text.as_bytes());
-                                paste_data.extend_from_slice(b"\x1b[201~");
-                                let _ = input_tx.send(Packet::ClientInput {
-                                    data: paste_data,
-                                });
-                            }
-                        }
-                        Ok(Event::Mouse(mouse_event)) => {
-                            let mouse_data = mouse_event_to_bytes(mouse_event);
-                            if !mouse_data.is_empty() {
-                                let _ = input_tx.send(Packet::ClientInput { data: mouse_data });
-                            }
-                        }
-                        Ok(Event::Resize(cols, rows)) => {
-                            if let Ok(mut pred) = predictor_input.lock() {
-                                pred.set_size(rows, cols);
-                            }
-                            let _ = input_tx.send(Packet::ClientResize { rows, cols });
-                        }
-                        _ => {}
+            if let Ok((cols, rows)) = size() {
+                if (cols, rows) != last_size {
+                    if let Ok(mut pred) = predictor_input.lock() {
+                        pred.set_size(rows, cols);
                     }
+                    let _ = input_tx.send(Packet::ClientResize { rows, cols });
+                    last_size = (cols, rows);
                 }
-            } else {
-                let mut buf = [0u8; 4096];
-                match std::io::stdin().read(&mut buf) {
-                    Ok(n) if n > 0 => {
-                        let _ = input_tx.send(Packet::ClientInput { data: buf[..n].to_vec() });
-                    }
-                    Ok(_) => {
+            }
+
+            match std::io::stdin().read(&mut buf) {
+                Ok(n) if n > 0 => {
+                    let data = &buf[..n];
+
+                    // Check for Ctrl+Q exit hotkey (\x11)
+                    if data.contains(&17) {
                         running_clone.store(false, Ordering::Relaxed);
                         break;
                     }
-                    Err(_) => {
-                        std::thread::sleep(std::time::Duration::from_millis(20));
+
+                    if let Ok(mut pred) = predictor_input.lock() {
+                        let _ = pred.handle_keystroke(data);
                     }
+                    let _ = input_tx.send(Packet::ClientInput { data: data.to_vec() });
+                }
+                Ok(_) => {
+                    running_clone.store(false, Ordering::Relaxed);
+                    break;
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => {
+                    break;
                 }
             }
         }
@@ -359,10 +329,12 @@ fn read_packet(reader: &mut impl io::Read) -> io::Result<Packet> {
     Packet::deserialize(&buf)
 }
 
+#[allow(dead_code)]
 struct ResponseFilter {
     buffer: Vec<u8>,
 }
 
+#[allow(dead_code)]
 impl ResponseFilter {
     fn new() -> Self {
         Self { buffer: Vec::new() }
@@ -418,6 +390,7 @@ impl ResponseFilter {
     }
 }
 
+#[allow(dead_code)]
 fn mouse_event_to_bytes(mouse: event::MouseEvent) -> Vec<u8> {
     let col = mouse.column + 1;
     let row = mouse.row + 1;
@@ -457,6 +430,7 @@ fn mouse_event_to_bytes(mouse: event::MouseEvent) -> Vec<u8> {
     format!("\x1b[<{};{};{}{}", button_code, col, row, final_char).into_bytes()
 }
 
+#[allow(dead_code)]
 fn key_event_to_bytes(key: event::KeyEvent) -> Vec<u8> {
     match key.code {
         KeyCode::Char(c) => {
