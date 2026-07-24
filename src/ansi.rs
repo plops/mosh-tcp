@@ -73,40 +73,79 @@ pub fn find_safe_split_point(buf: &[u8], target: usize) -> usize {
     best
 }
 
-/// Strips terminal color/query escape sequences (OSC 10/11, DA queries) statefully.
+/// Strips terminal color/query escape sequences (OSC 4/10/11/12, DA1/DA2/DA3, CPR 6n, DCS) statefully.
 /// Returns (cleaned_slice, unparsed_remaining_buffer).
 pub fn strip_terminal_queries_stateful(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let mut result = Vec::with_capacity(data.len());
     let mut i = 0;
     while i < data.len() {
-        if i + 5 <= data.len() && (&data[i..i + 5] == b"\x1b]10;" || &data[i..i + 5] == b"\x1b]11;") {
-            let mut j = i + 5;
-            let mut found_st = false;
-            while j < data.len() {
-                if data[j] == 0x07 {
-                    j += 1;
-                    found_st = true;
-                    break;
-                } else if data[j] == 0x1b && j + 1 < data.len() && data[j + 1] == b'\\' {
-                    j += 2;
-                    found_st = true;
-                    break;
-                }
-                j += 1;
-            }
-            if found_st {
-                i = j;
-                continue;
-            } else {
-                return (result, data[i..].to_vec());
-            }
-        }
-
         if data[i] == 0x1b {
             if i + 1 == data.len() {
                 return (result, data[i..].to_vec());
             }
             let next = data[i + 1];
+
+            // 1. OSC sequences (\x1b])
+            if next == b']' {
+                let mut j = i + 2;
+                let mut found_st = false;
+                while j < data.len() {
+                    if data[j] == 0x07 {
+                        j += 1;
+                        found_st = true;
+                        break;
+                    } else if data[j] == 0x1b && j + 1 < data.len() && data[j + 1] == b'\\' {
+                        j += 2;
+                        found_st = true;
+                        break;
+                    }
+                    j += 1;
+                }
+                if found_st {
+                    let sub = &data[i..j];
+                    // Strip color/palette queries (OSC 4, OSC 10, OSC 11, OSC 12) or any query containing '?'
+                    if sub.starts_with(b"\x1b]10;")
+                        || sub.starts_with(b"\x1b]11;")
+                        || sub.starts_with(b"\x1b]12;")
+                        || sub.starts_with(b"\x1b]4;")
+                        || sub.contains(&b'?')
+                    {
+                        i = j;
+                        continue;
+                    }
+                } else {
+                    return (result, data[i..].to_vec());
+                }
+            }
+
+            // 2. DCS sequences (\x1bP)
+            if next == b'P' {
+                let mut j = i + 2;
+                let mut found_st = false;
+                while j < data.len() {
+                    if data[j] == 0x07 {
+                        j += 1;
+                        found_st = true;
+                        break;
+                    } else if data[j] == 0x1b && j + 1 < data.len() && data[j + 1] == b'\\' {
+                        j += 2;
+                        found_st = true;
+                        break;
+                    }
+                    j += 1;
+                }
+                if found_st {
+                    let sub = &data[i..j];
+                    if sub.contains_str("$q") || sub.contains(&b'$') {
+                        i = j;
+                        continue;
+                    }
+                } else {
+                    return (result, data[i..].to_vec());
+                }
+            }
+
+            // 3. CSI sequences (\x1b[)
             if next == b'[' {
                 let mut j = i + 2;
                 let mut found_end = false;
@@ -121,7 +160,22 @@ pub fn strip_terminal_queries_stateful(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
                 }
                 if found_end {
                     let sub = &data[i..j];
-                    if sub == b"\x1b[c" || sub == b"\x1b[0c" || sub == b"\x1b[>c" || sub == b"\x1b[>0c" || sub == b"\x1b[>q" {
+                    // Check known query patterns: DA1, DA2, DA3, XTVERSION, CPR (6n)
+                    if sub == b"\x1b[c"
+                        || sub == b"\x1b[0c"
+                        || sub == b"\x1b[?c"
+                        || sub == b"\x1b[>c"
+                        || sub == b"\x1b[>0c"
+                        || sub == b"\x1b[>1c"
+                        || sub == b"\x1b[=c"
+                        || sub == b"\x1b[=0c"
+                        || sub == b"\x1b[>q"
+                        || sub == b"\x1b[q"
+                        || sub == b"\x1b[6n"
+                        || sub == b"\x1b[?6n"
+                        || (sub.starts_with(b"\x1b[?") && sub.ends_with(b"c"))
+                        || (sub.starts_with(b"\x1b[?") && sub.ends_with(b"n"))
+                    {
                         i = j;
                         continue;
                     }
@@ -136,3 +190,43 @@ pub fn strip_terminal_queries_stateful(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
     }
     (result, Vec::new())
 }
+
+trait ContainsStr {
+    fn contains_str(&self, needle: &str) -> bool;
+}
+
+impl ContainsStr for [u8] {
+    fn contains_str(&self, needle: &str) -> bool {
+        contains_subslice(self, needle.as_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_terminal_queries_stateful_da_and_cpr() {
+        let input = b"Hello\x1b[cWorld\x1b[6n!\x1b[>0cTest";
+        let (cleaned, remaining) = strip_terminal_queries_stateful(input);
+        assert_eq!(cleaned, b"HelloWorld!Test");
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_strip_terminal_queries_osc_color() {
+        let input = b"Prefix\x1b]10;?\x07Middle\x1b]11;?\x1b\\Suffix";
+        let (cleaned, remaining) = strip_terminal_queries_stateful(input);
+        assert_eq!(cleaned, b"PrefixMiddleSuffix");
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_strip_terminal_queries_partial_sequence() {
+        let input = b"Text\x1b[6";
+        let (cleaned, remaining) = strip_terminal_queries_stateful(input);
+        assert_eq!(cleaned, b"Text");
+        assert_eq!(remaining, b"\x1b[6");
+    }
+}
+

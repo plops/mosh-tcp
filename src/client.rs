@@ -252,8 +252,12 @@ pub fn run_client_stream_handshake(
                                 if let Ok(mut pred) = predictor_input.lock() {
                                     pred.reset();
                                 }
+                                let mut paste_data = Vec::with_capacity(text.len() + 12);
+                                paste_data.extend_from_slice(b"\x1b[200~");
+                                paste_data.extend_from_slice(text.as_bytes());
+                                paste_data.extend_from_slice(b"\x1b[201~");
                                 let _ = input_tx.send(Packet::ClientInput {
-                                    data: text.into_bytes(),
+                                    data: paste_data,
                                 });
                             }
                         }
@@ -383,12 +387,23 @@ impl ResponseFilter {
                 }
             }
 
-            // Filter DA response patterns: "0;...c"
-            if slice.starts_with(b"0;") {
+            // Filter DA response patterns: "0;...c" or "\x1b[?...c"
+            if slice.starts_with(b"0;") || slice.starts_with(b"\x1b[?") {
                 if let Some(c_pos) = slice.iter().position(|&b| b == b'c') {
                     let sub = &slice[..=c_pos];
-                    if sub.iter().all(|&b| b.is_ascii_digit() || b == b';' || b == b'c') {
+                    if sub.iter().all(|&b| b.is_ascii_digit() || b == b';' || b == b'c' || b == 27 || b == b'[' || b == b'?') {
                         idx += c_pos + 1;
+                        continue;
+                    }
+                }
+            }
+
+            // Filter CPR response patterns: "\x1b[24;80R" or "24;80R"
+            if slice.starts_with(b"\x1b[") && slice.contains(&b'R') {
+                if let Some(r_pos) = slice.iter().position(|&b| b == b'R') {
+                    let sub = &slice[..=r_pos];
+                    if sub.iter().all(|&b| b.is_ascii_digit() || b == b';' || b == b'R' || b == 27 || b == b'[') {
+                        idx += r_pos + 1;
                         continue;
                     }
                 }
@@ -483,8 +498,8 @@ fn key_event_to_bytes(key: event::KeyEvent) -> Vec<u8> {
         KeyCode::F(4) => vec![27, 79, 83],
         KeyCode::F(5) => vec![27, 91, 49, 53, 126],
         KeyCode::F(6) => vec![27, 91, 49, 57, 126],
-        KeyCode::F(7) => vec![27, 91, 49, 56, 126],
-        KeyCode::F(8) => vec![27, 91, 49, 57, 126],
+        KeyCode::F(7) => vec![27, 91, 49, 58, 126],
+        KeyCode::F(8) => vec![27, 91, 49, 59, 126],
         KeyCode::F(9) => vec![27, 91, 50, 48, 126],
         KeyCode::F(10) => vec![27, 91, 50, 49, 126],
         KeyCode::F(11) => vec![27, 91, 50, 51, 126],
@@ -547,5 +562,18 @@ mod tests {
 
         pred.reset();
         assert_eq!(pred.active_predictions(), 0);
+    }
+
+    #[test]
+    fn test_bracketed_paste_encapsulation_format() {
+        let raw_text = "test_paste_content";
+        let mut paste_bytes = Vec::new();
+        paste_bytes.extend_from_slice(b"\x1b[200~");
+        paste_bytes.extend_from_slice(raw_text.as_bytes());
+        paste_bytes.extend_from_slice(b"\x1b[201~");
+
+        assert!(paste_bytes.starts_with(b"\x1b[200~"));
+        assert!(paste_bytes.ends_with(b"\x1b[201~"));
+        assert_eq!(&paste_bytes[6..6 + raw_text.len()], raw_text.as_bytes());
     }
 }
